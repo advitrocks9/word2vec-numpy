@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.idea/
+.venv/
+*.egg-info/
+dist/
+build/
+text8
+text8.zip
+results/
+*.npz
+*.pkl
+.DS_Store
