@@ -143,11 +143,14 @@ class SGNSModel:
         context_and_neg_idx: npt.NDArray[np.int32] = self._cache["context_and_neg_idx"]
         d = self.embed_dim
 
-        np.add.at(self.W_in, center_idx, -lr * self._grad_v_in)
+        B, K_plus_1 = self._cache["labels"].shape
+        effective_lr = lr * B * K_plus_1
+
+        np.add.at(self.W_in, center_idx, -effective_lr * self._grad_v_in)
         np.add.at(
             self.W_out,
             context_and_neg_idx.ravel(),
-            (-lr * self._grad_v_out).reshape(-1, d),
+            (-effective_lr * self._grad_v_out).reshape(-1, d),
         )
 
     # ------------------------------------------------------------------

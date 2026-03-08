@@ -52,7 +52,7 @@ class DataLoader:
 
         Each word *w* is kept with probability::
 
-            P(keep) = min(1,  sqrt(t / f(w)))
+            P(keep) = min(1,  sqrt(t / f(w)) + t / f(w))
 
         where *f(w)* is the word's relative frequency and *t* is the
         subsampling threshold (typically 1e-5).  The entire operation is
@@ -62,7 +62,8 @@ class DataLoader:
         freqs = self.vocab.counts.astype(np.float64) / total  # (V,)
 
         # Per-vocab keep probability
-        p_keep = np.where(freqs > 0, np.minimum(1.0, np.sqrt(self.subsample_t / freqs)), 1.0)
+        ratio = self.subsample_t / np.maximum(freqs, 1e-20)
+        p_keep = np.where(freqs > 0, np.minimum(1.0, np.sqrt(ratio) + ratio), 1.0)
 
         # Look up keep probability for every token in the corpus
         token_keep_probs = p_keep[self.corpus]  # (corpus_len,)
@@ -94,36 +95,61 @@ class DataLoader:
         window = self.window
         B = self.batch_size
         K = self.n_negatives
-        n_batches = corpus_len // B
 
-        for _ in range(n_batches):
-            # 1. Random center positions (safe margin so context stays in bounds)
-            center_pos = np.random.randint(window, corpus_len - window, size=B)
+        # All valid center positions, shuffled for this epoch
+        positions = np.arange(window, corpus_len - window)
+        np.random.shuffle(positions)
 
-            # 2. Dynamic window size per sample: eff ∈ [1, window]
-            #    Matches original word2vec C code — nearby words are implicitly
-            #    up-weighted because they are selected more often.
-            reduction = np.random.randint(0, window, size=B)
-            eff_window = window - reduction  # [1, window]
+        # All possible non-zero offsets: [-window, ..., -1, 1, ..., window]
+        all_offsets = np.concatenate([np.arange(-window, 0), np.arange(1, window + 1)])
 
-            # 3. Sample one context offset per centre
-            #    Offset magnitude ∈ [1, eff_window], random sign
-            raw_offsets = np.random.randint(1, window + 1, size=B)
-            offsets = np.minimum(raw_offsets, eff_window)
-            signs = 2 * np.random.randint(0, 2, size=B) - 1  # ±1
-            context_pos = center_pos + offsets * signs
+        # --- Expand centers into ALL (center, context) pairs (chunked) ---
+        CHUNK = 200_000
+        pair_centers: list[npt.NDArray[np.int32]] = []
+        pair_contexts: list[npt.NDArray[np.int32]] = []
 
-            # 4. Look up word IDs
-            centers = corpus[center_pos]    # (B,)
-            contexts = corpus[context_pos]  # (B,)
+        for chunk_start in range(0, len(positions), CHUNK):
+            chunk_pos = positions[chunk_start : chunk_start + CHUNK]
+            n = len(chunk_pos)
 
-            # 5. Draw K negatives per pair from the smoothed unigram CDF
+            # Dynamic window: reduction ∈ [0, window) → eff ∈ [1, window]
+            reductions = np.random.randint(0, window, size=n)
+            eff_windows = window - reductions  # (n,), values in [1, window]
+
+            # Keep all offsets within [-eff, +eff] for each center
+            offset_mat = np.tile(all_offsets, (n, 1))          # (n, 2*window)
+            mask = np.abs(offset_mat) <= eff_windows[:, None]  # (n, 2*window)
+
+            # Flatten valid (center, context) position pairs
+            expanded_pos = np.repeat(chunk_pos, mask.sum(axis=1))
+            context_pos = expanded_pos + offset_mat[mask]
+
+            pair_centers.append(corpus[expanded_pos])
+            pair_contexts.append(corpus[context_pos])
+
+        all_centers = np.concatenate(pair_centers)
+        all_contexts = np.concatenate(pair_contexts)
+
+        # Shuffle pair ordering
+        perm = np.random.permutation(len(all_centers))
+        all_centers = all_centers[perm]
+        all_contexts = all_contexts[perm]
+
+        # --- Yield batches ---
+        n_batches = len(all_centers) // B
+        for i in range(n_batches):
+            s = i * B
+            e = s + B
+            centers = all_centers[s:e]
+            contexts = all_contexts[s:e]
+
+            # Draw K negatives per pair from the smoothed unigram CDF
             neg_uniform = np.random.rand(B, K)
-            negatives = np.searchsorted(self.vocab.neg_cdf, neg_uniform).astype(np.int32)  # (B, K)
+            negatives = np.searchsorted(self.vocab.neg_cdf, neg_uniform).astype(np.int32)
 
-            # 6. Assemble output
+            # Assemble output
             context_and_negs = np.concatenate(
-                [contexts[:, None], negatives], axis=1
+                [contexts[:, None], negatives], axis=1,
             )  # (B, 1+K)
 
             labels = np.zeros((B, 1 + K), dtype=np.float64)
@@ -132,5 +158,10 @@ class DataLoader:
             yield centers, context_and_negs, labels
 
     def __len__(self) -> int:
-        """Number of batches per epoch."""
-        return len(self.corpus) // self.batch_size
+        """Expected number of batches per epoch.
+
+        Each valid center produces on average ``(window + 1)`` context pairs
+        (dynamic window eff ∈ [1, window] gives E[2*eff] = window + 1).
+        """
+        n_valid = max(0, len(self.corpus) - 2 * self.window)
+        return max(1, (n_valid * (self.window + 1)) // self.batch_size)
