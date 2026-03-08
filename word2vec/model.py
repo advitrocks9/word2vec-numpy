@@ -1,4 +1,4 @@
-"""SGNS model: forward, backward, SGD update, persistence."""
+"""SGNS model: forward, backward, SGD update, gradient checking, persistence."""
 
 from __future__ import annotations
 
@@ -149,6 +149,97 @@ class SGNSModel:
             context_and_neg_idx.ravel(),
             (-lr * self._grad_v_out).reshape(-1, d),
         )
+
+    # ------------------------------------------------------------------
+    # Gradient check
+    # ------------------------------------------------------------------
+
+    def gradient_check(
+        self,
+        center_idx: npt.NDArray[np.int32],
+        context_and_neg_idx: npt.NDArray[np.int32],
+        labels: npt.NDArray[np.float64],
+        epsilon: float = 1e-5,
+    ) -> float:
+        """Verify the analytical backward pass against finite differences.
+
+        Computes centered finite-difference approximations for a random
+        subset of parameters and returns the maximum relative error.
+
+        Args:
+            center_idx: Center word indices, shape ``(B,)``.
+            context_and_neg_idx: Context + negative indices, shape ``(B, 1+K)``.
+            labels: Labels, shape ``(B, 1+K)``.
+            epsilon: Perturbation magnitude for finite differences.
+
+        Returns:
+            Maximum relative error across all checked parameters.
+        """
+        # Analytical gradients
+        self.forward(center_idx, context_and_neg_idx, labels)
+        self.backward()
+
+        # Accumulate per-batch-item gradients into full weight-matrix shapes.
+        # This is necessary because multiple batch items may reference the same
+        # weight index; the numerical gradient perturbs the shared weight, so
+        # the analytical gradient must sum all contributions.
+        d = self.embed_dim
+        grad_W_in = np.zeros_like(self.W_in)
+        np.add.at(grad_W_in, center_idx, self._grad_v_in)
+
+        grad_W_out = np.zeros_like(self.W_out)
+        np.add.at(
+            grad_W_out,
+            context_and_neg_idx.ravel(),
+            self._grad_v_out.reshape(-1, d),
+        )
+
+        max_rel_error = 0.0
+        n_checks = 5  # dimensions to probe per index
+
+        # --- Check W_in gradients ---
+        unique_centers = list(set(int(x) for x in center_idx))
+        for idx in unique_centers[:3]:
+            for j in range(min(d, n_checks)):
+                old = self.W_in[idx, j].copy()
+
+                self.W_in[idx, j] = old + epsilon
+                _, loss_plus = self.forward(center_idx, context_and_neg_idx, labels)
+
+                self.W_in[idx, j] = old - epsilon
+                _, loss_minus = self.forward(center_idx, context_and_neg_idx, labels)
+
+                self.W_in[idx, j] = old  # restore
+
+                num_grad = (loss_plus - loss_minus) / (2.0 * epsilon)
+                ana_grad = float(grad_W_in[idx, j])
+
+                denom = max(abs(num_grad), abs(ana_grad), 1e-8)
+                rel_err = abs(ana_grad - num_grad) / denom
+                max_rel_error = max(max_rel_error, rel_err)
+
+        # --- Check W_out gradients ---
+        unique_out = list(set(int(x) for x in context_and_neg_idx.ravel()))
+        for idx in unique_out[:3]:
+            for j in range(min(d, n_checks)):
+                old = self.W_out[idx, j].copy()
+
+                self.W_out[idx, j] = old + epsilon
+                _, loss_plus = self.forward(center_idx, context_and_neg_idx, labels)
+
+                self.W_out[idx, j] = old - epsilon
+                _, loss_minus = self.forward(center_idx, context_and_neg_idx, labels)
+
+                self.W_out[idx, j] = old  # restore
+
+                num_grad = (loss_plus - loss_minus) / (2.0 * epsilon)
+                ana_grad = float(grad_W_out[idx, j])
+
+                denom = max(abs(num_grad), abs(ana_grad), 1e-8)
+                rel_err = abs(ana_grad - num_grad) / denom
+                max_rel_error = max(max_rel_error, rel_err)
+
+        return max_rel_error
 
     # ------------------------------------------------------------------
     # Persistence
