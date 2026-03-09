@@ -25,17 +25,19 @@ from evaluate import (
 # Hyperparameters
 # ---------------------------------------------------------------------------
 
-EMBED_DIM = 100
+EMBED_DIM = 200
 WINDOW = 5
 N_NEGATIVES = 5
 MIN_COUNT = 5
 SUBSAMPLE_T = 1e-5
 LR_START = 0.025
 LR_END = 0.0001
-BATCH_SIZE = 512
-EPOCHS = 5
+BATCH_SIZE = 1024
+EPOCHS = 10
 LOG_INTERVAL = 1000
 SEED = 42
+PATIENCE = 3
+MIN_DELTA = 0.001
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +132,8 @@ def main() -> None:
     smoothed_loss = 0.0
     global_step = 0
     t_start = time.time()
+    best_loss = float("inf")
+    stale_epochs = 0
 
     for epoch in range(EPOCHS):
         epoch_start = time.time()
@@ -169,11 +173,22 @@ def main() -> None:
             global_step += 1
 
         epoch_time = time.time() - epoch_start
-        print(f"  -- Epoch {epoch + 1} done in {epoch_time:.1f}s")
+        print(f"  -- Epoch {epoch + 1} done in {epoch_time:.1f}s  (loss {smoothed_loss:.4f})")
 
         # Checkpoint
         model.save(f"results/model_epoch{epoch + 1}.npz")
         vocab.save(f"results/vocab_epoch{epoch + 1}.pkl")
+
+        # Plateau detection
+        if best_loss - smoothed_loss > MIN_DELTA:
+            best_loss = smoothed_loss
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+            print(f"  ** No improvement for {stale_epochs}/{PATIENCE} epochs")
+            if stale_epochs >= PATIENCE:
+                print(f"  ** Early stopping — loss plateaued at {smoothed_loss:.4f}")
+                break
 
     total_time = time.time() - t_start
     print(f"\nTraining complete in {total_time:.1f}s")
