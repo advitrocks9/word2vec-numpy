@@ -1,4 +1,4 @@
-"""Evaluation utilities: nearest neighbours, word analogies."""
+"""Evaluation utilities: nearest neighbours, word analogies, t-SNE, loss curve."""
 
 from __future__ import annotations
 
@@ -205,20 +205,137 @@ def print_analogy_results(results: dict[str, tuple[int, int]]) -> None:
         print(f"  {'OVERALL':<30s}  {overall_correct:>7d} / {overall_total:>5d}  {overall_acc:>5.1f}%")
 
 
+# ---------------------------------------------------------------------------
+# t-SNE visualisation
+# ---------------------------------------------------------------------------
+
 def plot_tsne(
     W_in: npt.NDArray[np.float64],
     vocab: Vocab,
     top_n: int = 500,
     path: str = "results/tsne.png",
 ) -> None:
-    """Placeholder for t-SNE visualization."""
-    pass
+    """Create a t-SNE scatter plot of the most frequent word embeddings.
 
+    Requires ``scikit-learn`` and ``matplotlib``.  If either is missing
+    the function prints a warning and returns without error.
+
+    Args:
+        W_in: Center embedding matrix, shape ``(V, d)``.
+        vocab: Vocabulary instance.
+        top_n: Number of most-frequent words to embed.
+        path: Output image path.
+    """
+    try:
+        from sklearn.manifold import TSNE  # type: ignore[import-untyped]
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        print(f"  Skipping t-SNE plot (missing dependency: {exc})")
+        return
+
+    # Top-N words by frequency (IDs 0..top_n-1 since vocab is sorted)
+    n = min(top_n, vocab.vocab_size)
+    embeddings = W_in[:n]
+    words = [vocab.idx_to_word[i] for i in range(n)]
+
+    print(f"  Running t-SNE on top {n} words ...")
+    tsne = TSNE(n_components=2, perplexity=30, random_state=42, init="pca", learning_rate="auto")
+    coords = tsne.fit_transform(embeddings)  # (n, 2)
+
+    # Curated label set — label roughly 50 words
+    label_words = {
+        "king", "queen", "man", "woman", "prince", "princess",
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "january", "february", "march", "april", "may", "june",
+        "france", "germany", "italy", "spain", "japan", "china", "india", "england",
+        "paris", "london", "berlin", "rome", "tokyo",
+        "war", "peace", "history", "science", "music", "art",
+        "good", "bad", "great", "new", "old", "small", "large",
+        "water", "river", "city", "world", "country",
+    }
+
+    # Colour coding by rough category
+    category_colours: dict[str, str] = {}
+    _royalty = {"king", "queen", "man", "woman", "prince", "princess"}
+    _numbers = {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"}
+    _months = {"january", "february", "march", "april", "may", "june"}
+    _countries = {"france", "germany", "italy", "spain", "japan", "china", "india", "england"}
+    _cities = {"paris", "london", "berlin", "rome", "tokyo"}
+    _adjectives = {"good", "bad", "great", "new", "old", "small", "large"}
+    for w in _royalty:
+        category_colours[w] = "red"
+    for w in _numbers:
+        category_colours[w] = "blue"
+    for w in _months:
+        category_colours[w] = "green"
+    for w in _countries:
+        category_colours[w] = "orange"
+    for w in _cities:
+        category_colours[w] = "purple"
+    for w in _adjectives:
+        category_colours[w] = "brown"
+
+    fig, ax = plt.subplots(figsize=(16, 12))
+    ax.scatter(coords[:, 0], coords[:, 1], s=4, alpha=0.3, c="grey")
+
+    for i, word in enumerate(words):
+        if word in label_words:
+            colour = category_colours.get(word, "black")
+            ax.annotate(
+                word,
+                xy=(coords[i, 0], coords[i, 1]),
+                fontsize=7,
+                color=colour,
+                alpha=0.85,
+            )
+
+    ax.set_title("t-SNE of word2vec embeddings (top-500 words)")
+    ax.set_xlabel("t-SNE 1")
+    ax.set_ylabel("t-SNE 2")
+    fig.tight_layout()
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved t-SNE plot to {path}")
+
+
+# ---------------------------------------------------------------------------
+# Loss curve
+# ---------------------------------------------------------------------------
 
 def plot_loss_curve(
     losses: list[float],
     path: str = "results/loss_curve.png",
     log_interval: int = 1000,
 ) -> None:
-    """Placeholder for loss curve plotting."""
-    pass
+    """Plot and save the training loss curve.
+
+    Args:
+        losses: Smoothed loss values recorded every *log_interval* steps.
+        path: Output image path.
+        log_interval: Number of training steps between each recorded loss.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("  Skipping loss curve (matplotlib not installed)")
+        return
+
+    steps = [i * log_interval for i in range(len(losses))]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(steps, losses, linewidth=0.8)
+    ax.set_xlabel("Training step")
+    ax.set_ylabel("Smoothed loss (EMA)")
+    ax.set_title("SGNS Training Loss")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved loss curve to {path}")
