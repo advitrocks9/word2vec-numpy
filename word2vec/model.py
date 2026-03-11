@@ -44,9 +44,13 @@ class SGNSModel:
     W_out (V, d): context embeddings — auxiliary, discarded post-training.
     """
 
-    def __init__(self, vocab_size: int, embed_dim: int = 100, n_negatives: int = 5) -> None:
+    def __init__(self, vocab_size: int, embed_dim: int = 100, n_negatives: int = 5,
+                 batch_size: int = 4096) -> None:
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
+        self.n_negatives = n_negatives
+        self.batch_size = batch_size
+        self.hparams: dict[str, int | float] = {}
 
         scale = 0.5 / embed_dim
         self.W_in: npt.NDArray[np.float64] = np.random.uniform(
@@ -60,8 +64,8 @@ class SGNSModel:
         self._grad_v_in: npt.NDArray[np.float64] = np.empty(0)
         self._grad_v_out: npt.NDArray[np.float64] = np.empty(0)
         nk = 1 + n_negatives
-        self._scores: npt.NDArray[np.float64] = np.empty((4096, nk), dtype=np.float64)
-        self._sigmoid: npt.NDArray[np.float64] = np.empty((4096, nk), dtype=np.float64)
+        self._scores: npt.NDArray[np.float64] = np.empty((batch_size, nk), dtype=np.float64)
+        self._sigmoid: npt.NDArray[np.float64] = np.empty((batch_size, nk), dtype=np.float64)
 
     def forward(
         self,
@@ -143,6 +147,7 @@ class SGNSModel:
         epsilon: float,
         n_checks: int,
     ) -> float:
+        """Finite-difference check on a subset of indices in W; returns max relative error."""
         max_rel_err = 0.0
         d = self.embed_dim
         for idx in unique_indices[:3]:
@@ -204,20 +209,32 @@ class SGNSModel:
         return max(err_in, err_out)
 
     def save(self, path: str) -> None:
-        """Save weights to a .npz file."""
-        np.savez(
-            path,
-            W_in=self.W_in,
-            W_out=self.W_out,
-            vocab_size=np.array(self.vocab_size),
-            embed_dim=np.array(self.embed_dim),
-        )
+        """Save weights and all hyperparameters to a .npz file."""
+        arrays: dict[str, npt.NDArray[np.float64]] = {
+            "W_in": self.W_in,
+            "W_out": self.W_out,
+            "vocab_size": np.array(self.vocab_size),
+            "embed_dim": np.array(self.embed_dim),
+            "n_negatives": np.array(self.n_negatives),
+            "batch_size": np.array(self.batch_size),
+        }
+        for k, v in self.hparams.items():
+            arrays[f"hp_{k}"] = np.array(v)
+        np.savez(path, **arrays)
 
     @classmethod
     def load(cls, path: str) -> "SGNSModel":
-        """Load weights from a .npz file."""
+        """Load weights and all hyperparameters from a .npz file."""
         data = np.load(path)
-        model = cls(int(data["vocab_size"]), int(data["embed_dim"]))
+        model = cls(
+            int(data["vocab_size"]),
+            int(data["embed_dim"]),
+            n_negatives=int(data["n_negatives"]),
+            batch_size=int(data["batch_size"]),
+        )
         model.W_in = data["W_in"]
         model.W_out = data["W_out"]
+        model.hparams = {
+            k[3:]: float(data[k]) for k in data.files if k.startswith("hp_")
+        }
         return model

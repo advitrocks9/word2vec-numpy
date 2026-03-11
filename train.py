@@ -99,9 +99,21 @@ def main() -> None:
     print(f"  Corpus after subsampling: {len(loader.corpus):,} tokens")
     print(f"  Batches per epoch: {len(loader):,}")
 
-    model = SGNSModel(vocab.vocab_size, embed_dim=EMBED_DIM, n_negatives=N_NEGATIVES)
+    model = SGNSModel(vocab.vocab_size, embed_dim=EMBED_DIM,
+                       n_negatives=N_NEGATIVES, batch_size=BATCH_SIZE)
     print(f"  Model: {vocab.vocab_size:,} x {EMBED_DIM} embeddings "
           f"({model.W_in.nbytes / 1e6:.1f} MB per matrix)")
+
+    HPARAMS: dict[str, int | float] = {
+        "window": WINDOW,
+        "min_count": MIN_COUNT,
+        "subsample_t": SUBSAMPLE_T,
+        "lr_start": LR_START,
+        "lr_end": LR_END,
+        "epochs": EPOCHS,
+        "seed": SEED,
+    }
+    model.hparams = HPARAMS
 
     losses: list[float] = []
     smoothed_loss = 0.0
@@ -116,6 +128,26 @@ def main() -> None:
         state_path = f"results/train_state_epoch{resume_epoch}.npz"
         print(f"\nResuming from epoch {resume_epoch} checkpoint ...")
         model = SGNSModel.load(ckpt_path)
+
+        mismatches: list[str] = []
+        for k, expected in HPARAMS.items():
+            actual = model.hparams.get(k)
+            if actual != expected:
+                mismatches.append(f"  {k}: checkpoint={actual} != current={expected}")
+        if model.n_negatives != N_NEGATIVES:
+            mismatches.append(f"  n_negatives: checkpoint={model.n_negatives} != current={N_NEGATIVES}")
+        if model.batch_size != BATCH_SIZE:
+            mismatches.append(f"  batch_size: checkpoint={model.batch_size} != current={BATCH_SIZE}")
+        if model.embed_dim != EMBED_DIM:
+            mismatches.append(f"  embed_dim: checkpoint={model.embed_dim} != current={EMBED_DIM}")
+        if mismatches:
+            raise ValueError(
+                f"Hyperparameter mismatch between checkpoint and current config:\n"
+                + "\n".join(mismatches)
+            )
+
+        model.hparams = HPARAMS
+
         if os.path.exists(state_path):
             state = np.load(state_path)
             global_step = int(state["global_step"])
@@ -129,18 +161,20 @@ def main() -> None:
         print(f"  global_step={global_step:,}, smoothed_loss={smoothed_loss:.4f}, "
               f"stale_epochs={stale_epochs}")
 
-    print("\nGradient check ...")
-    grad_check_iter = iter(loader)
-    gc_centers, gc_ctx_neg, gc_labels = next(grad_check_iter)
-    max_err = model.gradient_check(
-        gc_centers[:4], gc_ctx_neg[:4], gc_labels[:4]
-    )
-    status = "PASS" if max_err < 1e-5 else "FAIL"
-    print(f"  Max relative error: {max_err:.2e}  [{status}]")
-    assert max_err < 1e-5, f"Gradient check FAILED (max rel error = {max_err:.2e})"
-
     total_steps = EPOCHS * len(loader)
     remaining_epochs = EPOCHS - start_epoch
+
+    if remaining_epochs > 0:
+        print("\nGradient check ...")
+        grad_check_iter = iter(loader)
+        gc_centers, gc_ctx_neg, gc_labels = next(grad_check_iter)
+        max_err = model.gradient_check(
+            gc_centers[:4], gc_ctx_neg[:4], gc_labels[:4]
+        )
+        status = "PASS" if max_err < 1e-5 else "FAIL"
+        print(f"  Max relative error: {max_err:.2e}  [{status}]")
+        assert max_err < 1e-5, f"Gradient check FAILED (max rel error = {max_err:.2e})"
+
     print(f"\nTraining for {remaining_epochs} epoch(s) ({total_steps:,} total steps) ...")
 
     t_start = time.time()
