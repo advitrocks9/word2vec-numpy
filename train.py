@@ -17,6 +17,8 @@ from evaluate import (
     print_nearest_neighbors,
     word_analogy,
     print_analogy_results,
+    word_similarity,
+    print_similarity_results,
     plot_tsne,
     plot_loss_curve,
 )
@@ -25,9 +27,9 @@ from evaluate import (
 # Hyperparameters
 # ---------------------------------------------------------------------------
 
-EMBED_DIM = 200
-WINDOW = 5
-N_NEGATIVES = 5
+EMBED_DIM = 300
+WINDOW = 8
+N_NEGATIVES = 10
 MIN_COUNT = 5
 SUBSAMPLE_T = 1e-5
 LR_START = 0.025
@@ -72,6 +74,21 @@ def download_text8(path: str = "text8") -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+def _find_latest_checkpoint() -> int:
+    """Scan results/ for model_epoch{N}.npz and return the highest N, or 0."""
+    if not os.path.isdir("results"):
+        return 0
+    latest = 0
+    for fname in os.listdir("results"):
+        if fname.startswith("model_epoch") and fname.endswith(".npz"):
+            try:
+                n = int(fname[len("model_epoch"):-len(".npz")])
+                latest = max(latest, n)
+            except ValueError:
+                pass
+    return latest
+
+
 def main() -> None:
     """Run the full training and evaluation pipeline."""
     np.random.seed(SEED)
@@ -112,6 +129,33 @@ def main() -> None:
     print(f"  Model: {vocab.vocab_size:,} x {EMBED_DIM} embeddings "
           f"({model.W_in.nbytes / 1e6:.1f} MB per matrix)")
 
+    # ---- 5b. Resume detection -------------------------------------------
+    losses: list[float] = []
+    smoothed_loss = 0.0
+    global_step = 0
+    best_loss = float("inf")
+    stale_epochs = 0
+    start_epoch = 0
+
+    resume_epoch = _find_latest_checkpoint()
+    if resume_epoch > 0:
+        ckpt_path = f"results/model_epoch{resume_epoch}.npz"
+        state_path = f"results/train_state_epoch{resume_epoch}.npz"
+        print(f"\nResuming from epoch {resume_epoch} checkpoint ...")
+        model = SGNSModel.load(ckpt_path)
+        if os.path.exists(state_path):
+            state = np.load(state_path)
+            global_step = int(state["global_step"])
+            smoothed_loss = float(state["smoothed_loss"])
+            best_loss = float(state["best_loss"])
+            stale_epochs = int(state["stale_epochs"])
+            losses = list(state["losses"])
+        else:
+            global_step = resume_epoch * len(loader)
+        start_epoch = resume_epoch
+        print(f"  global_step={global_step:,}, smoothed_loss={smoothed_loss:.4f}, "
+              f"stale_epochs={stale_epochs}")
+
     # ---- 6. Gradient check ----------------------------------------------
     print("\nGradient check ...")
     # Grab a tiny batch for the check
@@ -126,16 +170,13 @@ def main() -> None:
 
     # ---- 7. Training loop -----------------------------------------------
     total_steps = EPOCHS * len(loader)
-    print(f"\nTraining for {EPOCHS} epochs ({total_steps:,} steps) ...")
+    remaining_epochs = EPOCHS - start_epoch
+    print(f"\nTraining for {remaining_epochs} epoch(s) ({total_steps:,} total steps) ...")
 
-    losses: list[float] = []
-    smoothed_loss = 0.0
-    global_step = 0
     t_start = time.time()
-    best_loss = float("inf")
-    stale_epochs = 0
+    initial_step = global_step  # Keep track of where this specific run started
 
-    for epoch in range(EPOCHS):
+    for epoch in range(start_epoch, EPOCHS):
         epoch_start = time.time()
 
         for centers, context_and_negs, labels in loader:
@@ -160,7 +201,11 @@ def main() -> None:
 
             if global_step % LOG_INTERVAL == 0:
                 elapsed = time.time() - t_start
-                tokens_per_sec = (global_step + 1) * BATCH_SIZE / max(elapsed, 1e-8)
+
+                # Calculate speed based ONLY on steps taken during this session
+                current_session_steps = global_step - initial_step
+                tokens_per_sec = (current_session_steps + 1) * BATCH_SIZE / max(elapsed, 1e-8)
+
                 print(
                     f"  Epoch {epoch + 1}/{EPOCHS} | "
                     f"Step {global_step:>7,}/{total_steps:,} | "
@@ -175,10 +220,6 @@ def main() -> None:
         epoch_time = time.time() - epoch_start
         print(f"  -- Epoch {epoch + 1} done in {epoch_time:.1f}s  (loss {smoothed_loss:.4f})")
 
-        # Checkpoint
-        model.save(f"results/model_epoch{epoch + 1}.npz")
-        vocab.save(f"results/vocab_epoch{epoch + 1}.pkl")
-
         # Plateau detection
         if best_loss - smoothed_loss > MIN_DELTA:
             best_loss = smoothed_loss
@@ -186,9 +227,22 @@ def main() -> None:
         else:
             stale_epochs += 1
             print(f"  ** No improvement for {stale_epochs}/{PATIENCE} epochs")
-            if stale_epochs >= PATIENCE:
-                print(f"  ** Early stopping — loss plateaued at {smoothed_loss:.4f}")
-                break
+
+        # Checkpoint (after plateau update so resumed state is correct)
+        model.save(f"results/model_epoch{epoch + 1}.npz")
+        vocab.save(f"results/vocab_epoch{epoch + 1}.pkl")
+        np.savez(
+            f"results/train_state_epoch{epoch + 1}.npz",
+            global_step=np.array(global_step),
+            smoothed_loss=np.array(smoothed_loss),
+            best_loss=np.array(best_loss),
+            stale_epochs=np.array(stale_epochs),
+            losses=np.array(losses),
+        )
+
+        if stale_epochs >= PATIENCE:
+            print(f"  ** Early stopping — loss plateaued at {smoothed_loss:.4f}")
+            break
 
     total_time = time.time() - t_start
     print(f"\nTraining complete in {total_time:.1f}s")
@@ -204,6 +258,12 @@ def main() -> None:
     print("\n=== Word Analogies ===")
     analogy_results = word_analogy(model.W_in, vocab)
     print_analogy_results(analogy_results)
+
+    print("\n=== Word Similarity ===")
+    sim_results = []
+    for dataset in ("wordsim353", "simlex999"):
+        sim_results.append(word_similarity(model.W_in, vocab, dataset=dataset))
+    print_similarity_results(sim_results)
 
     print("\n=== Visualisation ===")
     plot_loss_curve(losses, log_interval=LOG_INTERVAL)
