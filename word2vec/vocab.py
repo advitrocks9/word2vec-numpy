@@ -18,17 +18,13 @@ class Vocab:
         self.neg_cdf: npt.NDArray[np.float64] = np.array([], dtype=np.float64)
 
     def build(self, tokens: list[str], min_count: int = 5) -> None:
-        """Build vocabulary from a list of tokens.
-
-        Words below ``min_count`` are collapsed into ``<UNK>``. The vocabulary
-        is sorted by descending frequency so the most common words get the lowest IDs.
-        """
+        """Build vocab from tokens; words below min_count collapse into <UNK>."""
         if not tokens:
             raise ValueError("Cannot build vocabulary from an empty corpus.")
 
         raw_counts = Counter(tokens)
 
-        kept: list[tuple[str, int]] = []
+        kept = []
         unk_count = 0
         for word, count in raw_counts.items():
             if count >= min_count:
@@ -40,7 +36,7 @@ class Vocab:
 
         self.word_to_idx = {}
         self.idx_to_word = {}
-        count_list: list[int] = []
+        count_list = []
 
         for idx, (word, count) in enumerate(kept):
             self.word_to_idx[word] = idx
@@ -65,19 +61,18 @@ class Vocab:
         self.neg_cdf = cdf
 
     def sample_negatives(self, n: int) -> npt.NDArray[np.int32]:
-        """Draw *n* negative-sample word IDs from the smoothed unigram distribution."""
-        uniform_samples = np.random.rand(n)
-        return np.searchsorted(self.neg_cdf, uniform_samples).astype(np.int32)
+        """Draw n word IDs from the smoothed unigram distribution."""
+        return np.searchsorted(self.neg_cdf, np.random.rand(n)).astype(np.int32)
 
     def encode(self, tokens: list[str]) -> npt.NDArray[np.int32]:
-        """Map a list of tokens to integer IDs, with unknown words as ``<UNK>``."""
+        """Map tokens to integer IDs; unknown words become <UNK>."""
         unk_id = self.word_to_idx["<UNK>"]
         return np.array(
             [self.word_to_idx.get(w, unk_id) for w in tokens], dtype=np.int32
         )
 
     def save(self, path: str) -> None:
-        """Serialize the vocabulary to disk (pickle)."""
+        """Pickle the vocabulary to disk."""
         state = {
             "word_to_idx": self.word_to_idx,
             "idx_to_word": self.idx_to_word,
@@ -90,14 +85,14 @@ class Vocab:
 
     @classmethod
     def load(cls, path: str) -> "Vocab":
-        """Load a vocabulary from a pickle file."""
+        """Load a pickled vocabulary from disk."""
         with open(path, "rb") as f:
-            state: dict[str, object] = pickle.load(f)  # noqa: S301
+            state = pickle.load(f)  # noqa: S301
 
         vocab = cls()
-        vocab.word_to_idx = state["word_to_idx"]  # type: ignore[assignment]
-        vocab.idx_to_word = state["idx_to_word"]  # type: ignore[assignment]
-        vocab.counts = state["counts"]  # type: ignore[assignment]
-        vocab.vocab_size = state["vocab_size"]  # type: ignore[assignment]
-        vocab.neg_cdf = state["neg_cdf"]  # type: ignore[assignment]
+        vocab.word_to_idx = state["word_to_idx"]
+        vocab.idx_to_word = state["idx_to_word"]
+        vocab.counts = state["counts"]
+        vocab.vocab_size = state["vocab_size"]
+        vocab.neg_cdf = state["neg_cdf"]
         return vocab

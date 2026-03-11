@@ -9,16 +9,7 @@ from word2vec.vocab import Vocab
 
 
 class DataLoader:
-    """Produces training batches of (center, context+negatives, labels).
-
-    Args:
-        vocab: Built ``Vocab`` instance.
-        corpus: Encoded corpus as a 1-D ``int32`` array of word IDs.
-        window: Maximum context window half-size.
-        batch_size: Number of (center, context) pairs per batch.
-        n_negatives: Number of negative samples per positive pair.
-        subsample_t: Threshold *t* for Mikolov's subsampling of frequent words.
-    """
+    """Produces training batches of (center, context+negatives, labels)."""
 
     def __init__(
         self,
@@ -39,24 +30,18 @@ class DataLoader:
         self._subsample()
 
     def _subsample(self) -> None:
-        """Discard frequent words using Mikolov's subsampling formula."""
+        """Mikolov subsampling: drop frequent words with probability 1 - sqrt(t/f)."""
         total = float(self.vocab.counts.sum())
         freqs = self.vocab.counts.astype(np.float64) / total
 
         ratio = self.subsample_t / np.maximum(freqs, 1e-20)
         p_keep = np.where(freqs > 0, np.minimum(1.0, np.sqrt(ratio) + ratio), 1.0)
 
-        token_keep_probs = p_keep[self.corpus]
-        mask = np.random.rand(len(self.corpus)) < token_keep_probs
+        mask = np.random.rand(len(self.corpus)) < p_keep[self.corpus]
         self.corpus = self.corpus[mask]
 
     def __iter__(self) -> Iterator[tuple[npt.NDArray[np.int32], npt.NDArray[np.int32], npt.NDArray[np.float64]]]:
-        """Yield ``(centers, ctx_and_negs, labels)`` batches.
-
-        - ``centers``: center word IDs, shape ``(B,)``
-        - ``ctx_and_negs``: context (col 0) + negatives, shape ``(B, 1+K)``
-        - ``labels``: 1.0 for positive pair, 0.0 for negatives, shape ``(B, 1+K)``
-        """
+        """Yield (centers, ctx_and_negs, labels) batches."""
         corpus = self.corpus
         corpus_len = len(corpus)
         window = self.window
@@ -69,8 +54,8 @@ class DataLoader:
         all_offsets = np.concatenate([np.arange(-window, 0), np.arange(1, window + 1)])
 
         CHUNK = 200_000
-        pair_centers: list[npt.NDArray[np.int32]] = []
-        pair_contexts: list[npt.NDArray[np.int32]] = []
+        pair_centers = []
+        pair_contexts = []
 
         for chunk_start in range(0, len(positions), CHUNK):
             chunk_pos = positions[chunk_start : chunk_start + CHUNK]

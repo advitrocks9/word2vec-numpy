@@ -9,14 +9,8 @@ import numpy.typing as npt
 class SGNSModel:
     """Skip-Gram with Negative Sampling, pure NumPy.
 
-    Maintains two embedding matrices of shape ``(V, d)``:
-
-    * **W_in** (center / input embeddings): the usable embeddings after training.
-    * **W_out** (context / output embeddings): auxiliary; discarded post-training.
-
-    Args:
-        vocab_size: Number of words in the vocabulary (*V*).
-        embed_dim: Dimensionality of each embedding vector (*d*).
+    W_in (V, d): center embeddings — the output after training.
+    W_out (V, d): context embeddings — auxiliary, discarded post-training.
     """
 
     def __init__(self, vocab_size: int, embed_dim: int = 100) -> None:
@@ -42,22 +36,12 @@ class SGNSModel:
         ctx_neg_idx: npt.NDArray[np.int32],
         labels: npt.NDArray[np.float64],
     ) -> tuple[npt.NDArray[np.float64], float]:
-        """Compute SGNS scores and binary cross-entropy loss for a batch.
-
-        Args:
-            center_idx: Center word indices, shape ``(B,)``.
-            ctx_neg_idx: Context (column 0) + negative indices, shape ``(B, 1+K)``.
-            labels: Ground-truth labels (1 for positive, 0 for negative), shape ``(B, 1+K)``.
-
-        Returns:
-            ``(scores, loss)`` where scores has shape ``(B, 1+K)`` and loss is a scalar.
-        """
+        """SGNS forward pass; returns (scores, bce_loss)."""
         v_in = self.W_in[center_idx]      # (B, d)
         v_out = self.W_out[ctx_neg_idx]   # (B, 1+K, d)
 
         scores = np.einsum("bd,bkd->bk", v_in, v_out)  # (B, 1+K)
 
-        # Numerically stable BCE via logaddexp
         log_sig_pos = -np.logaddexp(0.0, -scores)
         log_sig_neg = -np.logaddexp(0.0, scores)
 
@@ -76,20 +60,16 @@ class SGNSModel:
         return scores, loss
 
     def backward(self) -> None:
-        """Compute gradients from the cached forward pass.
+        """Backprop through the cached forward pass."""
+        v_in = self._cache["v_in"]
+        v_out = self._cache["v_out"]
+        scores = self._cache["scores"]
+        labels = self._cache["labels"]
 
-        Gradients are stored in ``self._grad_v_in`` ``(B, d)`` and
-        ``self._grad_v_out`` ``(B, 1+K, d)``.
-        """
-        v_in: npt.NDArray[np.float64] = self._cache["v_in"]
-        v_out: npt.NDArray[np.float64] = self._cache["v_out"]
-        scores: npt.NDArray[np.float64] = self._cache["scores"]
-        labels: npt.NDArray[np.float64] = self._cache["labels"]
-
-        B, k_plus_1 = labels.shape
+        B, nk = labels.shape
 
         sigmoid = 1.0 / (1.0 + np.exp(-scores))
-        grad_scores = (sigmoid - labels) / (B * k_plus_1)
+        grad_scores = (sigmoid - labels) / (B * nk)
 
         self._grad_v_out = np.einsum("bk,bd->bkd", grad_scores, v_in)
         self._grad_v_in = np.einsum("bk,bkd->bd", grad_scores, v_out)
@@ -97,15 +77,15 @@ class SGNSModel:
     def update(self, lr: float) -> None:
         """Apply SGD with scatter-add for duplicate index accumulation.
 
-        ``np.add.at`` is used instead of fancy-indexed assignment because the
+        np.add.at is used instead of fancy-indexed assignment because the
         latter silently overwrites when the same index appears more than once.
         """
-        center_idx: npt.NDArray[np.int32] = self._cache["center_idx"]
-        ctx_neg_idx: npt.NDArray[np.int32] = self._cache["ctx_neg_idx"]
+        center_idx = self._cache["center_idx"]
+        ctx_neg_idx = self._cache["ctx_neg_idx"]
         d = self.embed_dim
 
-        B, k_plus_1 = self._cache["labels"].shape
-        effective_lr = lr * B * k_plus_1
+        B, nk = self._cache["labels"].shape
+        effective_lr = lr * B * nk
 
         np.add.at(self.W_in, center_idx, -effective_lr * self._grad_v_in)
         np.add.at(
@@ -125,7 +105,6 @@ class SGNSModel:
         epsilon: float,
         n_checks: int,
     ) -> float:
-        """Numerical gradient check for one weight matrix."""
         max_rel_err = 0.0
         d = self.embed_dim
         for idx in unique_indices[:3]:
@@ -155,16 +134,10 @@ class SGNSModel:
         labels: npt.NDArray[np.float64],
         epsilon: float = 1e-5,
     ) -> float:
-        """Verify the analytical backward pass against finite differences.
-
-        Returns the maximum relative error across all checked parameters.
-        """
+        """Finite-difference gradient check; returns max relative error."""
         self.forward(center_idx, ctx_neg_idx, labels)
         self.backward()
 
-        # Each batch item's gradient must be accumulated into the full weight
-        # matrix before comparing against finite differences, which perturb the
-        # shared weight and therefore see the sum of all contributions.
         d = self.embed_dim
         n_checks = 5
 
@@ -193,7 +166,7 @@ class SGNSModel:
         return max(err_in, err_out)
 
     def save(self, path: str) -> None:
-        """Save model weights to a ``.npz`` file."""
+        """Save weights to a .npz file."""
         np.savez(
             path,
             W_in=self.W_in,
@@ -204,7 +177,7 @@ class SGNSModel:
 
     @classmethod
     def load(cls, path: str) -> "SGNSModel":
-        """Load model weights from a ``.npz`` file."""
+        """Load weights from a .npz file."""
         data = np.load(path)
         model = cls(int(data["vocab_size"]), int(data["embed_dim"]))
         model.W_in = data["W_in"]
