@@ -206,6 +206,140 @@ def print_analogy_results(results: dict[str, tuple[int, int]]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Word similarity benchmarks (WordSim-353, SimLex-999)
+# ---------------------------------------------------------------------------
+
+_WORDSIM353_URL = (
+    "https://raw.githubusercontent.com/benathi/word2gm/"
+    "master/evaluation_data/wordsim353/combined.tab"
+)
+_SIMLEX999_URL = (
+    "https://raw.githubusercontent.com/benathi/word2gm/"
+    "master/evaluation_data/SimLex-999/SimLex-999.txt"
+)
+
+
+def _download_file(url: str, path: str) -> str:
+    """Download a file if it doesn't exist locally."""
+    if not os.path.exists(path):
+        print(f"  Downloading {os.path.basename(path)} ...")
+        urllib.request.urlretrieve(url, path)  # noqa: S310
+    return path
+
+
+def _spearman_correlation(
+    x: npt.NDArray[np.float64],
+    y: npt.NDArray[np.float64],
+) -> float:
+    """Spearman rank correlation between two 1-D arrays (pure NumPy)."""
+    def _rankdata(arr: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        order = np.argsort(arr)
+        ranks = np.empty_like(order, dtype=np.float64)
+        ranks[order] = np.arange(1, len(arr) + 1, dtype=np.float64)
+        return ranks
+
+    return float(np.corrcoef(_rankdata(x), _rankdata(y))[0, 1])
+
+
+def _load_similarity_dataset(
+    path: str,
+    word1_col: int,
+    word2_col: int,
+    score_col: int,
+) -> list[tuple[str, str, float]]:
+    """Parse a tab-separated word-similarity dataset (skip header, lowercase)."""
+    pairs: list[tuple[str, str, float]] = []
+    with open(path) as f:
+        next(f)  # skip header
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) <= max(word1_col, word2_col, score_col):
+                continue
+            w1 = parts[word1_col].lower()
+            w2 = parts[word2_col].lower()
+            score = float(parts[score_col])
+            pairs.append((w1, w2, score))
+    return pairs
+
+
+def word_similarity(
+    W_in: npt.NDArray[np.float64],
+    vocab: Vocab,
+    dataset: str = "wordsim353",
+) -> dict[str, object]:
+    """Evaluate embeddings on a word similarity benchmark.
+
+    Computes cosine similarity for each word pair, then reports the
+    Spearman rank correlation with human judgments.
+
+    Args:
+        W_in: Center embedding matrix, shape ``(V, d)``.
+        vocab: Vocabulary instance.
+        dataset: One of ``"wordsim353"`` or ``"simlex999"``.
+
+    Returns:
+        Dict with ``dataset``, ``spearman``, ``covered``, ``total``,
+        ``oov_pairs`` keys.
+    """
+    configs = {
+        "wordsim353": (_WORDSIM353_URL, "wordsim353.tab", 0, 1, 2),
+        "simlex999": (_SIMLEX999_URL, "SimLex-999.txt", 0, 1, 3),
+    }
+    if dataset not in configs:
+        raise ValueError(f"Unknown dataset {dataset!r}. Choose from {list(configs)}")
+
+    url, filename, w1_col, w2_col, score_col = configs[dataset]
+    _download_file(url, filename)
+    pairs = _load_similarity_dataset(filename, w1_col, w2_col, score_col)
+    total = len(pairs)
+
+    # Normalise embeddings once
+    norms = np.linalg.norm(W_in, axis=1, keepdims=True)
+    W_normed = W_in / np.maximum(norms, 1e-8)
+
+    human_scores: list[float] = []
+    model_scores: list[float] = []
+
+    for w1, w2, score in pairs:
+        idx1 = vocab.word_to_idx.get(w1)
+        idx2 = vocab.word_to_idx.get(w2)
+        if idx1 is None or idx2 is None:
+            continue
+        cos_sim = float(W_normed[idx1] @ W_normed[idx2])
+        human_scores.append(score)
+        model_scores.append(cos_sim)
+
+    covered = len(human_scores)
+    oov_pairs = total - covered
+
+    if covered < 2:
+        spearman = 0.0
+    else:
+        spearman = _spearman_correlation(
+            np.array(human_scores), np.array(model_scores)
+        )
+
+    return {
+        "dataset": dataset,
+        "spearman": spearman,
+        "covered": covered,
+        "total": total,
+        "oov_pairs": oov_pairs,
+    }
+
+
+def print_similarity_results(results: list[dict[str, object]]) -> None:
+    """Print a formatted word-similarity evaluation report."""
+    print(f"  {'Dataset':<15s}  {'Spearman':>8s}  {'Covered':>7s} / {'Total':>5s}  {'OOV':>5s}")
+    print("  " + "-" * 48)
+    for r in results:
+        print(
+            f"  {r['dataset']:<15s}  {r['spearman']:>8.4f}"
+            f"  {r['covered']:>7d} / {r['total']:>5d}  {r['oov_pairs']:>5d}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # t-SNE visualisation
 # ---------------------------------------------------------------------------
 
