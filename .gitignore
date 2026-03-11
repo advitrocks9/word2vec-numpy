@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+*.pyc
 *.egg-info/
 dist/
 build/
@@ -9,12 +10,14 @@ build/
 .idea/
 .DS_Store
 
-# Data & outputs
+# Data & evaluation files
 text8
 text8.zip
 questions-words.txt
 SimLex-999.txt
 wordsim353.tab
-*.npz
-*.pkl
-results/
+
+# Trained weights
+results/*.npz
+results/*.pkl
+
