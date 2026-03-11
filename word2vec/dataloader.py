@@ -87,8 +87,8 @@ class DataLoader:
             centers = all_centers[s:e]
             contexts = all_contexts[s:e]
 
-            neg_uniform = np.random.rand(B, K)
-            negatives = np.searchsorted(self.vocab.neg_cdf, neg_uniform).astype(np.int32)
+            neg_indices = np.random.randint(0, len(self.vocab.neg_table), size=(B, K))
+            negatives = self.vocab.neg_table[neg_indices]
 
             ctx_and_negs = np.concatenate(
                 [contexts[:, None], negatives], axis=1,

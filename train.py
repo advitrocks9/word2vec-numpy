@@ -21,19 +21,19 @@ from evaluate import (
     plot_loss_curve,
 )
 
-EMBED_DIM = 200
-WINDOW = 8
-N_NEGATIVES = 5
-MIN_COUNT = 5
-SUBSAMPLE_T = 1e-5
-LR_START = 0.025
-LR_END = 0.0001
-BATCH_SIZE = 4096
-EPOCHS = 15
+EMBED_DIM    = 200
+WINDOW       = 5
+N_NEGATIVES  = 10
+MIN_COUNT    = 5
+SUBSAMPLE_T  = 1e-4
+LR_START     = 0.025
+LR_END       = 0.0001
+BATCH_SIZE   = 4096
+EPOCHS       = 20
 LOG_INTERVAL = 1000
-SEED = 42
-PATIENCE = 3
-MIN_DELTA = 0.001
+SEED         = 42
+PATIENCE     = 5
+MIN_DELTA    = 0.0005
 
 
 def download_text8(path: str = "text8") -> str:
@@ -99,7 +99,7 @@ def main() -> None:
     print(f"  Corpus after subsampling: {len(loader.corpus):,} tokens")
     print(f"  Batches per epoch: {len(loader):,}")
 
-    model = SGNSModel(vocab.vocab_size, embed_dim=EMBED_DIM)
+    model = SGNSModel(vocab.vocab_size, embed_dim=EMBED_DIM, n_negatives=N_NEGATIVES)
     print(f"  Model: {vocab.vocab_size:,} x {EMBED_DIM} embeddings "
           f"({model.W_in.nbytes / 1e6:.1f} MB per matrix)")
 

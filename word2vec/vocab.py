@@ -15,7 +15,7 @@ class Vocab:
         self.idx_to_word: dict[int, str] = {}
         self.counts: npt.NDArray[np.int64] = np.array([], dtype=np.int64)
         self.vocab_size: int = 0
-        self.neg_cdf: npt.NDArray[np.float64] = np.array([], dtype=np.float64)
+        self.neg_table: npt.NDArray[np.int32] = np.array([], dtype=np.int32)
 
     def build(self, tokens: list[str], min_count: int = 5) -> None:
         """Build vocab from tokens; words below min_count collapse into <UNK>."""
@@ -54,15 +54,24 @@ class Vocab:
         self._build_neg_sampling_table()
 
     def _build_neg_sampling_table(self) -> None:
-        """Smoothed unigram CDF for negative sampling (Mikolov et al.)."""
+        """Pre-computed flat lookup table for O(1) negative sampling (Mikolov et al.).
+
+        100M slots, each word occupying a number of slots proportional to count^0.75.
+        Sampling reduces to a single randint index into this array.
+        """
+        TABLE_SIZE = 100_000_000
         powered = self.counts.astype(np.float64) ** 0.75
-        cdf = np.cumsum(powered)
-        cdf /= cdf[-1]
-        self.neg_cdf = cdf
+        probs = powered / powered.sum()
+        slots = np.floor(probs * TABLE_SIZE).astype(np.int64)
+        # floor truncates; give leftover slots to whichever words lost the most
+        remaining = TABLE_SIZE - int(slots.sum())
+        frac = probs * TABLE_SIZE - slots.astype(np.float64)
+        slots[np.argsort(frac)[::-1][:remaining]] += 1
+        self.neg_table = np.repeat(np.arange(self.vocab_size, dtype=np.int32), slots)
 
     def sample_negatives(self, n: int) -> npt.NDArray[np.int32]:
         """Draw n word IDs from the smoothed unigram distribution."""
-        return np.searchsorted(self.neg_cdf, np.random.rand(n)).astype(np.int32)
+        return self.neg_table[np.random.randint(0, len(self.neg_table), size=n)]
 
     def encode(self, tokens: list[str]) -> npt.NDArray[np.int32]:
         """Map tokens to integer IDs; unknown words become <UNK>."""
@@ -78,7 +87,7 @@ class Vocab:
             "idx_to_word": self.idx_to_word,
             "counts": self.counts,
             "vocab_size": self.vocab_size,
-            "neg_cdf": self.neg_cdf,
+            "neg_table": self.neg_table,
         }
         with open(path, "wb") as f:
             pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -94,5 +103,5 @@ class Vocab:
         vocab.idx_to_word = state["idx_to_word"]
         vocab.counts = state["counts"]
         vocab.vocab_size = state["vocab_size"]
-        vocab.neg_cdf = state["neg_cdf"]
+        vocab.neg_table = state["neg_table"]
         return vocab

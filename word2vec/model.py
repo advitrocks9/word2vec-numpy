@@ -2,8 +2,39 @@
 
 from typing import Any
 
+import numba
 import numpy as np
 import numpy.typing as npt
+
+
+@numba.njit(fastmath=True)
+def _scatter_update(
+    W_in: npt.NDArray[np.float64],
+    W_out: npt.NDArray[np.float64],
+    center_idx: npt.NDArray[np.int32],
+    ctx_neg_idx: npt.NDArray[np.int32],
+    grad_v_in: npt.NDArray[np.float64],
+    grad_v_out: npt.NDArray[np.float64],
+    effective_lr: float,
+) -> None:
+    """JIT-compiled scatter subtract for W_in and W_out.
+
+    Replaces np.add.at — iterates over batch and embedding dims directly,
+    which lets LLVM fuse the multiply-subtract and avoid the Python dispatch
+    overhead that np.add.at incurs per call.
+    """
+    B = center_idx.shape[0]
+    nk = ctx_neg_idx.shape[1]
+    d = W_in.shape[1]
+    for i in range(B):
+        ci = center_idx[i]
+        for j in range(d):
+            W_in[ci, j] -= effective_lr * grad_v_in[i, j]
+    for i in range(B):
+        for k in range(nk):
+            oi = ctx_neg_idx[i, k]
+            for j in range(d):
+                W_out[oi, j] -= effective_lr * grad_v_out[i, k, j]
 
 
 class SGNSModel:
@@ -13,11 +44,10 @@ class SGNSModel:
     W_out (V, d): context embeddings — auxiliary, discarded post-training.
     """
 
-    def __init__(self, vocab_size: int, embed_dim: int = 100) -> None:
+    def __init__(self, vocab_size: int, embed_dim: int = 100, n_negatives: int = 5) -> None:
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
 
-        # Xavier-style init scaled to keep initial dot products small
         scale = 0.5 / embed_dim
         self.W_in: npt.NDArray[np.float64] = np.random.uniform(
             -scale, scale, (vocab_size, embed_dim)
@@ -29,6 +59,9 @@ class SGNSModel:
         self._cache: dict[str, Any] = {}
         self._grad_v_in: npt.NDArray[np.float64] = np.empty(0)
         self._grad_v_out: npt.NDArray[np.float64] = np.empty(0)
+        nk = 1 + n_negatives
+        self._scores: npt.NDArray[np.float64] = np.empty((4096, nk), dtype=np.float64)
+        self._sigmoid: npt.NDArray[np.float64] = np.empty((4096, nk), dtype=np.float64)
 
     def forward(
         self,
@@ -40,7 +73,10 @@ class SGNSModel:
         v_in = self.W_in[center_idx]      # (B, d)
         v_out = self.W_out[ctx_neg_idx]   # (B, 1+K, d)
 
-        scores = np.einsum("bd,bkd->bk", v_in, v_out)  # (B, 1+K)
+        B = len(center_idx)
+        nk = ctx_neg_idx.shape[1]
+        scores = self._scores[:B, :nk]
+        np.einsum("bd,bkd->bk", v_in, v_out, out=scores)  # (B, 1+K)
 
         log_sig_pos = -np.logaddexp(0.0, -scores)
         log_sig_neg = -np.logaddexp(0.0, scores)
@@ -68,30 +104,32 @@ class SGNSModel:
 
         B, nk = labels.shape
 
-        sigmoid = 1.0 / (1.0 + np.exp(-scores))
-        grad_scores = (sigmoid - labels) / (B * nk)
+        sig = self._sigmoid[:B, :nk]
+        np.exp(-scores, out=sig)
+        np.add(1.0, sig, out=sig)
+        np.divide(1.0, sig, out=sig)
+        grad_scores = (sig - labels) / (B * nk)
 
         self._grad_v_out = np.einsum("bk,bd->bkd", grad_scores, v_in)
         self._grad_v_in = np.einsum("bk,bkd->bd", grad_scores, v_out)
 
     def update(self, lr: float) -> None:
-        """Apply SGD with scatter-add for duplicate index accumulation.
+        """Apply SGD; delegates scatter-add to the Numba JIT kernel.
 
-        np.add.at is used instead of fancy-indexed assignment because the
-        latter silently overwrites when the same index appears more than once.
+        Direct fancy-indexed assignment silently overwrites duplicate indices,
+        so the JIT loop manually accumulates each occurrence instead.
         """
         center_idx = self._cache["center_idx"]
         ctx_neg_idx = self._cache["ctx_neg_idx"]
-        d = self.embed_dim
 
         B, nk = self._cache["labels"].shape
         effective_lr = lr * B * nk
 
-        np.add.at(self.W_in, center_idx, -effective_lr * self._grad_v_in)
-        np.add.at(
-            self.W_out,
-            ctx_neg_idx.ravel(),
-            (-effective_lr * self._grad_v_out).reshape(-1, d),
+        _scatter_update(
+            self.W_in, self.W_out,
+            center_idx, ctx_neg_idx,
+            self._grad_v_in, self._grad_v_out,
+            effective_lr,
         )
 
     def _check_grad_block(
