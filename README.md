@@ -1,220 +1,131 @@
 # word2vec-numpy
 
-Pure NumPy implementation of **Skip-Gram with Negative Sampling (SGNS)**, the word2vec algorithm, trained on the [text8](http://mattmahoney.net/dc/textdata.html) corpus (~17 M words).
+Pure NumPy implementation of Skip-Gram with Negative Sampling, trained on text8.
 
-No ML frameworks. Just NumPy, hand-derived gradients, and a gradient check to prove they're correct.
+## Overview
 
-## Why
-
-To demonstrate low-level ML engineering fluency: understanding the math, implementing the gradients from scratch, proving correctness via numerical verification, and writing clean, type-annotated Python.
+A from-scratch implementation of the word2vec SGNS algorithm using only NumPy and Numba for numerical computation. No PyTorch, TensorFlow, or other ML frameworks. Trained on the text8 corpus (~17M tokens), producing 200-dimensional word embeddings that capture semantic and syntactic relationships. All gradients are hand-derived and verified via finite-difference checking before training begins.
 
 ## Architecture
 
-Three decoupled components with single responsibilities:
+| Module | Role |
+|--------|------|
+| `word2vec/vocab.py` | String/integer mapping, frequency counting, and O(1) negative sampling via a 100M-slot precomputed table. |
+| `word2vec/dataloader.py` | Mikolov subsampling, vectorized dynamic windowing, and batch generation with no Python-level loops over corpus positions. |
+| `word2vec/model.py` | SGNS forward/backward passes via `einsum`, Numba JIT scatter-update SGD, and numerical gradient verification. |
+| `evaluate.py` | Word analogies, word similarity benchmarks, nearest neighbours, and all visualisation (t-SNE, loss curves, heatmaps, PCA). |
+| `train.py` | CLI entry point: downloads data, builds vocab, trains with linear LR decay and early stopping, checkpoints every epoch, runs full evaluation. |
 
-```mermaid
-graph LR
-    A["Raw Text"] --> B["Vocab"]
-    B --> C["DataLoader"]
-    C --> D["SGNSModel"]
-    D --> E["Embeddings"]
+## Implementation Details
 
-    B -. "str / int mapping\nfrequency counts\nnegative-sampling CDF" .-> B
-    C -. "subsampling\ndynamic windowing\nvectorized batching" .-> C
-    D -. "forward / backward\nSGD update\ngradient check" .-> D
-```
+**Numba JIT scatter kernel.** NumPy's fancy indexing (`W[indices] -= grads`) silently overwrites when the same word index appears multiple times in a batch. The `_scatter_update` function is a Numba-compiled loop that correctly accumulates each occurrence, while LLVM fuses the multiply-subtract for throughput close to native C.
 
-- **`Vocab`**: string/integer mapping, frequency counts, negative sampling CDF
-- **`DataLoader`**: subsampling, dynamic windowing, fully vectorized batch generation (no Python for-loops)
-- **`SGNSModel`**: forward/backward via `einsum`, scatter-update SGD, numerical gradient check
+**Gradient normalisation.** The backward pass divides gradients by `B * (1+K)` (batch size times number of context/negative samples) so the loss is a proper mean for stable logging. The update step multiplies the learning rate by the same factor, recovering per-pair SGD magnitude. The effective per-pair learning rate equals the base LR, matching the original word2vec C implementation.
 
-Each component is independently testable and knows nothing about the others' internals.
+**O(1) negative sampling.** A flat array of 100M slots is precomputed at vocab-build time, with each word occupying a number of slots proportional to its frequency raised to the 0.75 power. Sampling reduces to a single `np.random.randint` call, avoiding the overhead of `np.random.choice` (which is O(vocab_size) per call).
 
-## Training Pipeline
+**Vectorized dynamic windowing.** The dataloader expands all valid (center, context) pairs using NumPy broadcasting and fancy indexing, processed in 200K-token chunks to bound memory usage. Window reduction is sampled per-position and applied as a mask, avoiding any Python loop over corpus positions.
 
-```mermaid
-flowchart TD
-    A[Download text8 corpus] --> B[Build Vocabulary]
-    B --> C[Encode corpus to IDs]
-    C --> D[Create DataLoader]
-    D --> E[Initialize SGNSModel]
-    E --> F[Run Gradient Check]
-    F --> G[Training Loop]
-    G --> H{Converged?}
-    H -- No --> G
-    H -- Yes --> I[Evaluate]
-    I --> J[Nearest Neighbors]
-    I --> K[Word Analogies]
-    I --> L[t-SNE + Loss Curve]
-```
+**Mikolov subsampling.** Frequent words are probabilistically dropped before training using the standard formula: keep probability = sqrt(t/f) + t/f, where f is word frequency and t is the subsampling threshold (1e-4).
 
-## Mathematical Foundation
+**Checkpoint resume.** Full training state (global step, smoothed loss, best loss, stale epoch count, loss history) is persisted alongside model weights and vocabulary after every epoch. Training can resume from any checkpoint with identical behaviour.
 
-### Loss Function
+**W_in + W_out combination.** Following Levy, Goldberg & Dagan (2015), combining the input and output embedding matrices via element-wise addition can improve similarity benchmarks. Both matrices are evaluated separately and in combination.
 
-For one (center, context) pair with *K* negative samples:
+## Training
 
-$$L = -\log \sigma(u_o \cdot v_c) - \sum_{k=1}^{K} \log \sigma(-u_k \cdot v_c)$$
+![Training Loss with Learning Rate Schedule](results/loss_curve.png)
 
-where $v_c = W_{in}[c]$, $u_o = W_{out}[o]$, $u_k = W_{out}[\text{neg}_k]$, and $\sigma$ is the sigmoid.
-
-### Gradients
-
-$$\frac{\partial L}{\partial v_c} = -(1 - \sigma(u_o \cdot v_c)) \cdot u_o + \sum_k \sigma(u_k \cdot v_c) \cdot u_k$$
-
-$$\frac{\partial L}{\partial u_o} = -(1 - \sigma(u_o \cdot v_c)) \cdot v_c$$
-
-$$\frac{\partial L}{\partial u_k} = \sigma(u_k \cdot v_c) \cdot v_c$$
-
-The key insight: `grad_scores = sigmoid(scores) - labels`, identical to logistic regression. The backward pass is two lines of `einsum`.
-
-### Gradient Verification
-
-Before training, a centered finite-difference check verifies the analytical gradients:
-
-$$\frac{\partial L}{\partial W_{ij}} \approx \frac{L(W_{ij} + \epsilon) - L(W_{ij} - \epsilon)}{2\epsilon}$$
-
-Relative error must be below $10^{-5}$ for all checked parameters. This runs once at startup (~1 second) and mathematically proves the backward pass is correct.
-
-## Results
-
-### Training Loss
-
-The model converges smoothly with linear learning rate decay over 10 epochs:
-
-![Training Loss](results/loss_curve.png)
-
-### Word Embeddings (t-SNE)
-
-t-SNE visualization of the top 500 most frequent word embeddings, color-coded by semantic category:
-
-![t-SNE Visualization](results/tsne.png)
-
-### Nearest Neighbors
-
-| Query | Top-5 Neighbors |
-|-------|-----------------|
-| king | mormaer, eochaid, necho, godwinson, holinshed |
-| queen | elizabeth, hrh, gruoch, gloriana, regnant |
-| computer | computers, omputer, hardware, programmability, peripherals |
-| france | roissy, bourbons, cordiale, vichy, cherbourg |
-| river | tributaries, rivers, ziibi, tributary, sutlej |
-
-### Word Analogies
-
-Accuracy on the [Google analogy test set](https://raw.githubusercontent.com/tmikolov/word2vec/master/questions-words.txt) (~19,544 questions):
-
-| Category | Accuracy |
-|----------|----------|
-| capital-common-countries | 58.7% |
-| capital-world | 32.0% |
-| city-in-state | 24.2% |
-| currency | 9.2% |
-| family | 21.0% |
-| gram1-adjective-to-adverb | 5.0% |
-| gram2-opposite | 4.6% |
-| gram6-nationality-adjective | 75.0% |
-| **Overall** | **25.4%** |
-
-### Word Similarity
-
-| Dataset | Spearman *rho* | Coverage |
-|---------|---------------|----------|
-| WordSim-353 | 0.717 | 351 / 353 |
-| SimLex-999 | 0.308 | 992 / 999 |
-
-> Results are typical for a pure NumPy implementation trained on text8. Production systems (gensim, fasttext) achieve higher accuracy through optimized C code and larger corpora.
-
-## Usage
-
-### Requirements
-
-- Python 3.10+
-- NumPy
-- matplotlib (for plots)
-- scikit-learn (for t-SNE visualization)
-
-```bash
-pip install numpy matplotlib scikit-learn
-```
-
-### Training
-
-```bash
-python train.py
-```
-
-This will:
-1. Download the text8 corpus (~100 MB) if not present
-2. Build vocabulary (min count = 5)
-3. Run gradient check (verifies backward pass correctness)
-4. Train for up to 10 epochs with linear LR decay and early stopping (patience = 3)
-5. Save checkpoints to `results/`
-6. Run evaluation: nearest neighbours, word analogies, t-SNE plot
-
-### Loading Trained Embeddings
-
-```python
-from word2vec import Vocab, SGNSModel
-
-vocab = Vocab.load("results/vocab_final.pkl")
-model = SGNSModel.load("results/model_final.npz")
-
-# model.W_in is the (V, d) embedding matrix
-embeddings = model.W_in
-```
+The model was trained for 20 epochs with linear learning rate decay from 0.025 to 0.0001. Final smoothed loss (EMA, alpha=0.05): **0.2343**. Total training time: approximately 2.25 hours on CPU. Throughput: approximately 140,000 tokens/second.
 
 ## Hyperparameters
 
-| Parameter | Value | Justification |
-|-----------|-------|---------------|
-| Embedding dim *d* | 300 | Standard for text8-scale corpora |
-| Window size | 8 | Wider window for syntactic and semantic context |
-| Negative samples *K* | 10 | More negatives improve gradient signal |
-| Min count | 5 | Removes hapax legomena |
-| Subsample *t* | 1e-5 | Original paper value |
-| Learning rate | 0.025 -> 0.0001 | Linear decay (original C impl) |
-| Batch size | 1024 | Good vectorization sweet spot |
-| Epochs | 10 | With early stopping (patience = 3) |
-| Init scale | 0.5/*d* | Keeps initial scores near zero |
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Embedding dim | 200 | Recommended for corpora under 100M tokens (Levy, Goldberg & Dagan, 2015) |
+| Window size | 5 | Standard for balanced syntactic/semantic capture (Mikolov et al., 2013) |
+| Negative samples | 10 | Stronger gradient signal; 5-20 is typical for small corpora |
+| Min count | 5 | Removes hapax legomena and reduces vocabulary noise |
+| Subsampling threshold | 1e-4 | Aggressive subsampling of frequent words (Mikolov et al., 2013) |
+| Learning rate | 0.025 to 0.0001 | Linear decay, matching the original C implementation |
+| Batch size | 4096 | Balances vectorisation efficiency with gradient noise |
+| Epochs | 20 | With early stopping (patience=5, min delta=0.0005) |
+| Init scale | 0.5/d | Keeps initial dot-product scores near zero |
 
-## Implementation Notes
+## Results
 
-### Vectorized Batch Generation
+### Word Analogies
 
-The data pipeline avoids Python for-loops entirely. For each epoch, all valid center positions are expanded into every (center, context) pair within their dynamic window, done in 200 K-token chunks to control memory. Negatives are drawn via `np.searchsorted` on a precomputed CDF.
+Accuracy on the Google analogy test set (19,544 questions, 14 categories):
 
-### `np.add.at` for Scatter Updates
+| Embedding | Overall Accuracy |
+|-----------|-----------------|
+| W_in | **36.2%** (6460 / 17827) |
+| W_in + W_out | 35.4% (6308 / 17827) |
 
-`np.add.at(W, indices, grads)` correctly accumulates gradients when the same word index appears multiple times in a batch. Standard fancy indexing (`W[indices] -= grads`) silently overwrites on duplicates.
+![Per-Category Analogy Accuracy](results/analogy_categories.png)
 
-This operation is a known NumPy bottleneck: it bypasses internal buffering because it cannot assume unique indices. In a production C++/Numba system, this would use atomic adds or thread-local accumulators. Staying in pure NumPy is the project constraint.
+Semantic categories (capital-common-countries: 78.7%, nationality-adjective: 79.5%) score highest, as expected for distributional models. Syntactic categories like opposites (4.8%) and adjective-to-adverb (12.0%) are harder, reflecting the limited morphological signal in a small corpus.
 
-### Numerical Stability
+### Word Similarity
 
-Loss is computed via `np.logaddexp(0, -x)` rather than `log(clip(sigmoid(x)))`. The former is exact for all float64 values; the latter artificially bounds the loss when scores are very negative.
+| Dataset | W_in (Spearman rho) | W_in + W_out (Spearman rho) | Coverage |
+|---------|---------------------|----------------------------|----------|
+| WordSim-353 | 0.693 | **0.712** | 351 / 353 |
+| SimLex-999 | **0.298** | 0.298 | 992 / 999 |
 
-### Learning Rate Scaling
+The W_in + W_out combination improves WordSim-353 correlation by ~2 points, consistent with findings in Levy et al. (2015). SimLex-999 scores are lower across both representations, as expected: SimLex measures strict similarity (not relatedness), which is harder to capture from co-occurrence statistics alone.
 
-The loss is computed as a mean over all `B * (1 + K)` scores for stable logging, but the learning rate is scaled by `B * (1 + K)` in the update step. This recovers per-pair SGD magnitude, matching the original word2vec C implementation.
+### Cosine Similarity Structure
 
-## File Structure
+![Cosine Similarity Heatmap](results/similarity_heatmap.png)
 
+Block-diagonal structure confirms that the embedding space clusters semantically related words. Within-group similarities (e.g., royalty terms, country names) are consistently higher than cross-group similarities.
+
+### Analogy Vector Geometry
+
+![PCA Projection of Analogy Relationships](results/analogy_vectors.png)
+
+PCA projection of analogy pairs shows approximately parallel displacement vectors, demonstrating that the model has learned consistent linear offsets for semantic relationships (country-capital, gender).
+
+### Nearest Neighbours
+
+| Query | Top-5 Neighbours (cosine similarity) |
+|-------|--------------------------------------|
+| king | kings (0.66), queen (0.61), elessar (0.59), crowned (0.59), fortinbras (0.57) |
+| computer | computers (0.78), hardware (0.71), computing (0.67), software (0.65), bresenham (0.60) |
+| france | spain (0.64), belgium (0.63), vexin (0.62), italy (0.62), french (0.62) |
+| river | rivers (0.74), tributaries (0.71), murrumbidgee (0.70), sutlej (0.68), ziibi (0.67) |
+
+### t-SNE Visualisation
+
+![t-SNE Projection of Word Embeddings](results/tsne.png)
+
+**Performance ceiling.** These results are representative for a 17M-token corpus. Production word2vec systems trained on billions of tokens with optimised C code achieve 60-75% analogy accuracy. The implementation is correct and the hyperparameters are well-tuned; the primary limiting factor is corpus size.
+
+## Reproducing Results
+
+```bash
+pip install .
+python train.py
 ```
-word2vec-numpy/
-├── word2vec/
-│   ├── __init__.py        # Package exports
-│   ├── vocab.py           # Vocab: tokenization, freq counts, neg sampling table
-│   ├── dataloader.py      # DataLoader: subsampling, vectorized windowing, batching
-│   └── model.py           # SGNSModel: forward, backward, update, gradientCheck
-├── evaluate.py            # Analogies, nearest neighbours, t-SNE, loss curve
-├── train.py               # CLI entry point
-├── README.md
-├── py.typed               # PEP 561 type-checking marker
-└── results/
-    ├── model_final.npz    # Trained embeddings
-    ├── vocab_final.pkl    # Vocabulary
-    ├── train_state_epoch{N}.npz  # Checkpoint training state
-    ├── tsne.png           # t-SNE visualization
-    └── loss_curve.png     # Training loss
-```
+
+This downloads the text8 corpus (~100 MB), builds the vocabulary, runs a gradient check, trains for 20 epochs, and produces all evaluation outputs and plots. Training takes approximately 2.25 hours on a modern CPU. Trained weights are not included in the repository due to size (~230 MB per matrix, ~460 MB total) but are fully reproducible from the fixed random seed.
+
+## Requirements
+
+- Python 3.10+
+- NumPy >= 1.24
+- Numba >= 0.57
+- matplotlib >= 3.7 (visualisation)
+- scikit-learn >= 1.3 (t-SNE)
+- adjustText >= 1.0 (t-SNE label placement)
+
+See `pyproject.toml` for exact version constraints.
+
+## References
+
+1. Mikolov, T., Chen, K., Corrado, G., & Dean, J. (2013). Efficient estimation of word representations in vector space. *arXiv:1301.3781*.
+2. Mikolov, T., Sutskever, I., Chen, K., Corrado, G., & Dean, J. (2013). Distributed representations of words and phrases and their compositionality. *NeurIPS 2013*.
+3. Levy, O., & Goldberg, Y. (2014). Neural word embedding as implicit matrix factorization. *NeurIPS 2014*.
+4. Levy, O., Goldberg, Y., & Dagan, I. (2015). Improving distributional similarity with lessons learned from word embeddings. *TACL, 3*, 211-225.
