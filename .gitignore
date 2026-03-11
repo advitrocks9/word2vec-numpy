@@ -1,14 +1,20 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-.idea/
-.venv/
 *.egg-info/
 dist/
 build/
+.venv/
+
+# IDE
+.idea/
+.DS_Store
+
+# Data & outputs
 text8
 text8.zip
-results/
+questions-words.txt
+SimLex-999.txt
+wordsim353.tab
 *.npz
 *.pkl
-.DS_Store
+results/

@@ -1,7 +1,5 @@
 """Evaluation utilities: nearest neighbours, word analogies, t-SNE, loss curve."""
 
-from __future__ import annotations
-
 import os
 import urllib.request
 
@@ -9,10 +7,6 @@ import numpy as np
 import numpy.typing as npt
 
 from word2vec.vocab import Vocab
-
-# ---------------------------------------------------------------------------
-# Nearest neighbours
-# ---------------------------------------------------------------------------
 
 PROBE_WORDS: list[str] = [
     "king", "queen", "computer", "science",
@@ -26,26 +20,16 @@ def nearest_neighbors(
     vocab: Vocab,
     top_k: int = 10,
 ) -> list[tuple[str, float]]:
-    """Find the *top_k* nearest words by cosine similarity.
-
-    Args:
-        word: Query word.
-        W_in: Center embedding matrix, shape ``(V, d)``.
-        vocab: Vocabulary for ID ↔ string conversion.
-        top_k: Number of neighbours to return.
-
-    Returns:
-        List of ``(word, similarity)`` tuples sorted by descending similarity.
-    """
+    """Return the *top_k* nearest words by cosine similarity."""
     idx = vocab.word_to_idx.get(word)
     if idx is None:
         return []
 
-    norms = np.linalg.norm(W_in, axis=1, keepdims=True)  # (V, 1)
+    norms = np.linalg.norm(W_in, axis=1, keepdims=True)
     W_normed = W_in / np.maximum(norms, 1e-8)
 
-    sims: npt.NDArray[np.float64] = W_normed @ W_normed[idx]  # (V,)
-    sims[idx] = -np.inf  # exclude the query word itself
+    sims = W_normed @ W_normed[idx]
+    sims[idx] = -np.inf
 
     top_indices = np.argsort(sims)[-top_k:][::-1]
     return [(vocab.idx_to_word[int(i)], float(sims[i])) for i in top_indices]
@@ -57,14 +41,7 @@ def print_nearest_neighbors(
     words: list[str] | None = None,
     top_k: int = 10,
 ) -> None:
-    """Print a formatted table of nearest neighbours for probe words.
-
-    Args:
-        W_in: Center embedding matrix, shape ``(V, d)``.
-        vocab: Vocabulary instance.
-        words: Words to query (defaults to :data:`PROBE_WORDS`).
-        top_k: Neighbours per word.
-    """
+    """Print nearest neighbours for each word in *words*."""
     if words is None:
         words = PROBE_WORDS
 
@@ -73,13 +50,8 @@ def print_nearest_neighbors(
         if not neighbors:
             print(f"  '{word}' not in vocabulary")
             continue
-        neighbour_str = ", ".join(f"{w} ({s:.3f})" for w, s in neighbors)
-        print(f"  {word:12s} -> {neighbour_str}")
+        print(f"  {word:12s} -> {', '.join(f'{w} ({s:.3f})' for w, s in neighbors)}")
 
-
-# ---------------------------------------------------------------------------
-# Word analogy task
-# ---------------------------------------------------------------------------
 
 _ANALOGY_URL = (
     "https://raw.githubusercontent.com/tmikolov/word2vec/"
@@ -88,14 +60,7 @@ _ANALOGY_URL = (
 
 
 def _download_analogies(path: str = "questions-words.txt") -> str:
-    """Download Google's analogy test set if it doesn't exist locally.
-
-    Args:
-        path: Local destination.
-
-    Returns:
-        The local file path.
-    """
+    """Download Google's analogy test set if not present locally."""
     if not os.path.exists(path):
         print(f"Downloading analogy test set to {path} ...")
         urllib.request.urlretrieve(_ANALOGY_URL, path)  # noqa: S310
@@ -109,21 +74,13 @@ def word_analogy(
 ) -> dict[str, tuple[int, int]]:
     """Evaluate word analogies (a : b :: c : ?).
 
-    For each analogy quadruple ``(a, b, c, d)``, computes
-    ``argmax_{w ∉ {a,b,c}} cos(w, b − a + c)`` and checks whether the
-    result equals *d*.
+    For each quadruple ``(a, b, c, d)``, finds the word closest to
+    ``b - a + c`` (excluding the query words) and checks if it equals *d*.
 
-    Args:
-        W_in: Center embedding matrix, shape ``(V, d)``.
-        vocab: Vocabulary instance.
-        questions_path: Path to the analogies file.
-
-    Returns:
-        Dict mapping category name → ``(correct, total)`` counts.
+    Returns a dict mapping category name to ``(correct, total)`` counts.
     """
     questions_path = _download_analogies(questions_path)
 
-    # Normalise embeddings once
     norms = np.linalg.norm(W_in, axis=1, keepdims=True)
     W_normed = W_in / np.maximum(norms, 1e-8)
 
@@ -138,7 +95,6 @@ def word_analogy(
             if not line:
                 continue
             if line.startswith(":"):
-                # Save previous category
                 if current_category and total > 0:
                     results[current_category] = (correct, total)
                 current_category = line[2:]
@@ -151,31 +107,25 @@ def word_analogy(
                 continue
             a, b, c, d = parts
 
-            # Skip if any word is OOV
             if any(w not in vocab.word_to_idx for w in (a, b, c, d)):
                 continue
 
-            ia, ib, ic, id_ = (vocab.word_to_idx[w] for w in (a, b, c, d))
+            ia, ib, ic, id_target = (vocab.word_to_idx[w] for w in (a, b, c, d))
 
-            # v = b - a + c
             query = W_normed[ib] - W_normed[ia] + W_normed[ic]
             query_norm = np.linalg.norm(query)
             if query_norm > 0:
                 query /= query_norm
 
-            sims: npt.NDArray[np.float64] = W_normed @ query  # (V,)
-
-            # Exclude input words
+            sims = W_normed @ query
             sims[ia] = -np.inf
             sims[ib] = -np.inf
             sims[ic] = -np.inf
 
-            predicted = int(np.argmax(sims))
-            if predicted == id_:
+            if int(np.argmax(sims)) == id_target:
                 correct += 1
             total += 1
 
-    # Save last category
     if current_category and total > 0:
         results[current_category] = (correct, total)
 
@@ -183,11 +133,7 @@ def word_analogy(
 
 
 def print_analogy_results(results: dict[str, tuple[int, int]]) -> None:
-    """Print a formatted analogy accuracy report.
-
-    Args:
-        results: Dict from :func:`word_analogy`.
-    """
+    """Print a formatted analogy accuracy report."""
     overall_correct = 0
     overall_total = 0
 
@@ -204,10 +150,6 @@ def print_analogy_results(results: dict[str, tuple[int, int]]) -> None:
         print("  " + "-" * 56)
         print(f"  {'OVERALL':<30s}  {overall_correct:>7d} / {overall_total:>5d}  {overall_acc:>5.1f}%")
 
-
-# ---------------------------------------------------------------------------
-# Word similarity benchmarks (WordSim-353, SimLex-999)
-# ---------------------------------------------------------------------------
 
 _WORDSIM353_URL = (
     "https://raw.githubusercontent.com/benathi/word2gm/"
@@ -250,15 +192,16 @@ def _load_similarity_dataset(
     """Parse a tab-separated word-similarity dataset (skip header, lowercase)."""
     pairs: list[tuple[str, str, float]] = []
     with open(path) as f:
-        next(f)  # skip header
+        next(f)
         for line in f:
             parts = line.strip().split("\t")
             if len(parts) <= max(word1_col, word2_col, score_col):
                 continue
-            w1 = parts[word1_col].lower()
-            w2 = parts[word2_col].lower()
-            score = float(parts[score_col])
-            pairs.append((w1, w2, score))
+            pairs.append((
+                parts[word1_col].lower(),
+                parts[word2_col].lower(),
+                float(parts[score_col]),
+            ))
     return pairs
 
 
@@ -269,17 +212,13 @@ def word_similarity(
 ) -> dict[str, object]:
     """Evaluate embeddings on a word similarity benchmark.
 
-    Computes cosine similarity for each word pair, then reports the
-    Spearman rank correlation with human judgments.
-
     Args:
         W_in: Center embedding matrix, shape ``(V, d)``.
         vocab: Vocabulary instance.
         dataset: One of ``"wordsim353"`` or ``"simlex999"``.
 
     Returns:
-        Dict with ``dataset``, ``spearman``, ``covered``, ``total``,
-        ``oov_pairs`` keys.
+        Dict with ``dataset``, ``spearman``, ``covered``, ``total``, ``oov_pairs``.
     """
     configs = {
         "wordsim353": (_WORDSIM353_URL, "wordsim353.tab", 0, 1, 2),
@@ -293,7 +232,6 @@ def word_similarity(
     pairs = _load_similarity_dataset(filename, w1_col, w2_col, score_col)
     total = len(pairs)
 
-    # Normalise embeddings once
     norms = np.linalg.norm(W_in, axis=1, keepdims=True)
     W_normed = W_in / np.maximum(norms, 1e-8)
 
@@ -305,9 +243,8 @@ def word_similarity(
         idx2 = vocab.word_to_idx.get(w2)
         if idx1 is None or idx2 is None:
             continue
-        cos_sim = float(W_normed[idx1] @ W_normed[idx2])
         human_scores.append(score)
-        model_scores.append(cos_sim)
+        model_scores.append(float(W_normed[idx1] @ W_normed[idx2]))
 
     covered = len(human_scores)
     oov_pairs = total - covered
@@ -339,10 +276,6 @@ def print_similarity_results(results: list[dict[str, object]]) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# t-SNE visualisation
-# ---------------------------------------------------------------------------
-
 def plot_tsne(
     W_in: npt.NDArray[np.float64],
     vocab: Vocab,
@@ -351,14 +284,7 @@ def plot_tsne(
 ) -> None:
     """Create a t-SNE scatter plot of the most frequent word embeddings.
 
-    Requires ``scikit-learn`` and ``matplotlib``.  If either is missing
-    the function prints a warning and returns without error.
-
-    Args:
-        W_in: Center embedding matrix, shape ``(V, d)``.
-        vocab: Vocabulary instance.
-        top_n: Number of most-frequent words to embed.
-        path: Output image path.
+    Requires ``scikit-learn`` and ``matplotlib``.
     """
     try:
         from sklearn.manifold import TSNE  # type: ignore[import-untyped]
@@ -369,16 +295,14 @@ def plot_tsne(
         print(f"  Skipping t-SNE plot (missing dependency: {exc})")
         return
 
-    # Top-N words by frequency (IDs 0..top_n-1 since vocab is sorted)
     n = min(top_n, vocab.vocab_size)
     embeddings = W_in[:n]
     words = [vocab.idx_to_word[i] for i in range(n)]
 
     print(f"  Running t-SNE on top {n} words ...")
     tsne = TSNE(n_components=2, perplexity=30, random_state=42, init="pca", learning_rate="auto")
-    coords = tsne.fit_transform(embeddings)  # (n, 2)
+    coords = tsne.fit_transform(embeddings)
 
-    # Curated label set — label roughly 50 words
     label_words = {
         "king", "queen", "man", "woman", "prince", "princess",
         "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
@@ -390,38 +314,26 @@ def plot_tsne(
         "water", "river", "city", "world", "country",
     }
 
-    # Colour coding by rough category
-    category_colours: dict[str, str] = {}
-    _royalty = {"king", "queen", "man", "woman", "prince", "princess"}
-    _numbers = {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"}
-    _months = {"january", "february", "march", "april", "may", "june"}
-    _countries = {"france", "germany", "italy", "spain", "japan", "china", "india", "england"}
-    _cities = {"paris", "london", "berlin", "rome", "tokyo"}
-    _adjectives = {"good", "bad", "great", "new", "old", "small", "large"}
-    for w in _royalty:
-        category_colours[w] = "red"
-    for w in _numbers:
-        category_colours[w] = "blue"
-    for w in _months:
-        category_colours[w] = "green"
-    for w in _countries:
-        category_colours[w] = "orange"
-    for w in _cities:
-        category_colours[w] = "purple"
-    for w in _adjectives:
-        category_colours[w] = "brown"
+    categories = {
+        "red": {"king", "queen", "man", "woman", "prince", "princess"},
+        "blue": {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"},
+        "green": {"january", "february", "march", "april", "may", "june"},
+        "orange": {"france", "germany", "italy", "spain", "japan", "china", "india", "england"},
+        "purple": {"paris", "london", "berlin", "rome", "tokyo"},
+        "brown": {"good", "bad", "great", "new", "old", "small", "large"},
+    }
+    category_colors = {w: c for c, words in categories.items() for w in words}
 
     fig, ax = plt.subplots(figsize=(16, 12))
     ax.scatter(coords[:, 0], coords[:, 1], s=4, alpha=0.3, c="grey")
 
     for i, word in enumerate(words):
         if word in label_words:
-            colour = category_colours.get(word, "black")
             ax.annotate(
                 word,
                 xy=(coords[i, 0], coords[i, 1]),
                 fontsize=7,
-                color=colour,
+                color=category_colors.get(word, "black"),
                 alpha=0.85,
             )
 
@@ -436,10 +348,6 @@ def plot_tsne(
     print(f"  Saved t-SNE plot to {path}")
 
 
-# ---------------------------------------------------------------------------
-# Loss curve
-# ---------------------------------------------------------------------------
-
 def plot_loss_curve(
     losses: list[float],
     path: str = "results/loss_curve.png",
@@ -450,7 +358,7 @@ def plot_loss_curve(
     Args:
         losses: Smoothed loss values recorded every *log_interval* steps.
         path: Output image path.
-        log_interval: Number of training steps between each recorded loss.
+        log_interval: Steps between each recorded loss value.
     """
     try:
         import matplotlib

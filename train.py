@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """CLI entry point: download text8, run gradient check, train SGNS, evaluate."""
 
-from __future__ import annotations
-
 import os
 import time
 import urllib.request
@@ -23,38 +21,23 @@ from evaluate import (
     plot_loss_curve,
 )
 
-# ---------------------------------------------------------------------------
-# Hyperparameters
-# ---------------------------------------------------------------------------
-
 EMBED_DIM = 300
-WINDOW = 8
-N_NEGATIVES = 10
+WINDOW = 10
+N_NEGATIVES = 15
 MIN_COUNT = 5
 SUBSAMPLE_T = 1e-5
 LR_START = 0.025
 LR_END = 0.0001
-BATCH_SIZE = 1024
-EPOCHS = 10
+BATCH_SIZE = 4096
+EPOCHS = 50
 LOG_INTERVAL = 1000
 SEED = 42
 PATIENCE = 3
 MIN_DELTA = 0.001
 
 
-# ---------------------------------------------------------------------------
-# Data download
-# ---------------------------------------------------------------------------
-
 def download_text8(path: str = "text8") -> str:
-    """Download and extract the text8 corpus if not already present.
-
-    Args:
-        path: Destination file path for the extracted text.
-
-    Returns:
-        The file path to the extracted corpus.
-    """
+    """Download and extract the text8 corpus if not already present."""
     if os.path.exists(path):
         return path
 
@@ -69,10 +52,6 @@ def download_text8(path: str = "text8") -> str:
     os.remove(zip_path)
     return path
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def _find_latest_checkpoint() -> int:
     """Scan results/ for model_epoch{N}.npz and return the highest N, or 0."""
@@ -94,25 +73,21 @@ def main() -> None:
     np.random.seed(SEED)
     os.makedirs("results", exist_ok=True)
 
-    # ---- 1. Data --------------------------------------------------------
     text8_path = download_text8()
     print("Loading corpus ...")
     with open(text8_path) as f:
         tokens = f.read().strip().split()
     print(f"  Raw corpus: {len(tokens):,} tokens")
 
-    # ---- 2. Vocabulary --------------------------------------------------
     print("Building vocabulary ...")
     vocab = Vocab()
     vocab.build(tokens, min_count=MIN_COUNT)
     print(f"  Vocabulary size: {vocab.vocab_size:,}")
 
-    # ---- 3. Encode ------------------------------------------------------
     print("Encoding corpus ...")
     corpus = vocab.encode(tokens)
     print(f"  Encoded corpus: {corpus.shape[0]:,} int32 IDs")
 
-    # ---- 4. DataLoader (subsampling inside) -----------------------------
     print("Creating DataLoader (subsampling) ...")
     loader = DataLoader(
         vocab, corpus,
@@ -124,12 +99,10 @@ def main() -> None:
     print(f"  Corpus after subsampling: {len(loader.corpus):,} tokens")
     print(f"  Batches per epoch: {len(loader):,}")
 
-    # ---- 5. Model -------------------------------------------------------
     model = SGNSModel(vocab.vocab_size, embed_dim=EMBED_DIM)
     print(f"  Model: {vocab.vocab_size:,} x {EMBED_DIM} embeddings "
           f"({model.W_in.nbytes / 1e6:.1f} MB per matrix)")
 
-    # ---- 5b. Resume detection -------------------------------------------
     losses: list[float] = []
     smoothed_loss = 0.0
     global_step = 0
@@ -156,9 +129,7 @@ def main() -> None:
         print(f"  global_step={global_step:,}, smoothed_loss={smoothed_loss:.4f}, "
               f"stale_epochs={stale_epochs}")
 
-    # ---- 6. Gradient check ----------------------------------------------
     print("\nGradient check ...")
-    # Grab a tiny batch for the check
     grad_check_iter = iter(loader)
     gc_centers, gc_ctx_neg, gc_labels = next(grad_check_iter)
     max_err = model.gradient_check(
@@ -168,32 +139,24 @@ def main() -> None:
     print(f"  Max relative error: {max_err:.2e}  [{status}]")
     assert max_err < 1e-5, f"Gradient check FAILED (max rel error = {max_err:.2e})"
 
-    # ---- 7. Training loop -----------------------------------------------
     total_steps = EPOCHS * len(loader)
     remaining_epochs = EPOCHS - start_epoch
     print(f"\nTraining for {remaining_epochs} epoch(s) ({total_steps:,} total steps) ...")
 
     t_start = time.time()
-    initial_step = global_step  # Keep track of where this specific run started
+    initial_step = global_step
 
     for epoch in range(start_epoch, EPOCHS):
         epoch_start = time.time()
 
-        for centers, context_and_negs, labels in loader:
-            # Linear LR decay
+        for centers, ctx_and_negs, labels in loader:
             progress = global_step / total_steps
             lr = LR_START + (LR_END - LR_START) * progress
 
-            # Forward
-            _, loss = model.forward(centers, context_and_negs, labels)
-
-            # Backward
+            _, loss = model.forward(centers, ctx_and_negs, labels)
             model.backward()
-
-            # Update
             model.update(lr)
 
-            # Logging
             if global_step == 0:
                 smoothed_loss = loss
             else:
@@ -201,10 +164,8 @@ def main() -> None:
 
             if global_step % LOG_INTERVAL == 0:
                 elapsed = time.time() - t_start
-
-                # Calculate speed based ONLY on steps taken during this session
-                current_session_steps = global_step - initial_step
-                tokens_per_sec = (current_session_steps + 1) * BATCH_SIZE / max(elapsed, 1e-8)
+                session_steps = global_step - initial_step
+                tokens_per_sec = (session_steps + 1) * BATCH_SIZE / elapsed
 
                 print(
                     f"  Epoch {epoch + 1}/{EPOCHS} | "
@@ -220,7 +181,6 @@ def main() -> None:
         epoch_time = time.time() - epoch_start
         print(f"  -- Epoch {epoch + 1} done in {epoch_time:.1f}s  (loss {smoothed_loss:.4f})")
 
-        # Plateau detection
         if best_loss - smoothed_loss > MIN_DELTA:
             best_loss = smoothed_loss
             stale_epochs = 0
@@ -228,7 +188,6 @@ def main() -> None:
             stale_epochs += 1
             print(f"  ** No improvement for {stale_epochs}/{PATIENCE} epochs")
 
-        # Checkpoint (after plateau update so resumed state is correct)
         model.save(f"results/model_epoch{epoch + 1}.npz")
         vocab.save(f"results/vocab_epoch{epoch + 1}.pkl")
         np.savez(
@@ -241,17 +200,15 @@ def main() -> None:
         )
 
         if stale_epochs >= PATIENCE:
-            print(f"  ** Early stopping — loss plateaued at {smoothed_loss:.4f}")
+            print(f"  ** Early stopping -- loss plateaued at {smoothed_loss:.4f}")
             break
 
     total_time = time.time() - t_start
     print(f"\nTraining complete in {total_time:.1f}s")
 
-    # Final save
     model.save("results/model_final.npz")
     vocab.save("results/vocab_final.pkl")
 
-    # ---- 8. Evaluation --------------------------------------------------
     print("\n=== Nearest Neighbours ===")
     print_nearest_neighbors(model.W_in, vocab)
 
