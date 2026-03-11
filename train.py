@@ -19,6 +19,9 @@ from evaluate import (
     print_similarity_results,
     plot_tsne,
     plot_loss_curve,
+    plot_analogy_categories,
+    plot_similarity_heatmap,
+    plot_analogy_vectors,
 )
 
 EMBED_DIM    = 200
@@ -256,9 +259,25 @@ def main() -> None:
         sim_results.append(word_similarity(model.W_in, vocab, dataset=dataset))
     print_similarity_results(sim_results)
 
+    W_combined = model.W_in + model.W_out
+
+    print("\n=== Word Analogies (W_in + W_out) ===")
+    combined_analogy = word_analogy(W_combined, vocab)
+    print_analogy_results(combined_analogy)
+
+    print("\n=== Word Similarity (W_in + W_out) ===")
+    combined_sim = []
+    for dataset in ("wordsim353", "simlex999"):
+        combined_sim.append(word_similarity(W_combined, vocab, dataset=dataset))
+    print_similarity_results(combined_sim)
+
     print("\n=== Visualisation ===")
-    plot_loss_curve(losses, log_interval=LOG_INTERVAL)
+    plot_loss_curve(losses, log_interval=LOG_INTERVAL, lr_start=LR_START,
+                    lr_end=LR_END, total_steps=total_steps, epochs=EPOCHS)
     plot_tsne(model.W_in, vocab)
+    plot_analogy_categories(analogy_results)
+    plot_similarity_heatmap(model.W_in, vocab)
+    plot_analogy_vectors(model.W_in, vocab)
 
     print("\nDone.")
 
