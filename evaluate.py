@@ -175,9 +175,19 @@ def _spearman_correlation(
 ) -> float:
     """Spearman rank correlation between two 1-D arrays (pure NumPy)."""
     def _rankdata(arr: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        order = np.argsort(arr)
+        order = np.argsort(arr, kind="mergesort")
         ranks = np.empty_like(order, dtype=np.float64)
         ranks[order] = np.arange(1, len(arr) + 1, dtype=np.float64)
+        sorted_arr = arr[order]
+        i = 0
+        while i < len(sorted_arr):
+            j = i + 1
+            while j < len(sorted_arr) and sorted_arr[j] == sorted_arr[i]:
+                j += 1
+            if j > i + 1:
+                avg_rank = 0.5 * (i + 1 + j)
+                ranks[order[i:j]] = avg_rank
+            i = j
         return ranks
 
     return float(np.corrcoef(_rankdata(x), _rankdata(y))[0, 1])
