@@ -1,12 +1,9 @@
-"""Evaluation utilities: nearest neighbours, word analogies, t-SNE, loss curve."""
+"""Evaluation: analogies, similarity, nearest neighbours, plots"""
 
 import os
 import urllib.request
 
 import numpy as np
-import numpy.typing as npt
-
-from word2vec.vocab import Vocab
 
 PROBE_WORDS: list[str] = [
     "king", "queen", "computer", "science",
@@ -14,13 +11,7 @@ PROBE_WORDS: list[str] = [
 ]
 
 
-def nearest_neighbors(
-    word: str,
-    W_in: npt.NDArray[np.float64],
-    vocab: Vocab,
-    top_k: int = 10,
-) -> list[tuple[str, float]]:
-    """Return the *top_k* nearest words by cosine similarity."""
+def nearest_neighbors(word, W_in, vocab, top_k=10):
     idx = vocab.word_to_idx.get(word)
     if idx is None:
         return []
@@ -35,13 +26,7 @@ def nearest_neighbors(
     return [(vocab.idx_to_word[int(i)], float(sims[i])) for i in top_indices]
 
 
-def print_nearest_neighbors(
-    W_in: npt.NDArray[np.float64],
-    vocab: Vocab,
-    words: list[str] | None = None,
-    top_k: int = 10,
-) -> None:
-    """Print nearest neighbours for each word in *words*."""
+def print_nearest_neighbors(W_in, vocab, words=None, top_k=10):
     if words is None:
         words = PROBE_WORDS
 
@@ -59,26 +44,16 @@ _ANALOGY_URL = (
 )
 
 
-def _download_analogies(path: str = "questions-words.txt") -> str:
-    """Download Google's analogy test set if not present locally."""
+def _download_analogies(path="questions-words.txt"):
+    """Download Google analogy questions if needed."""
     if not os.path.exists(path):
         print(f"Downloading analogy test set to {path} ...")
-        urllib.request.urlretrieve(_ANALOGY_URL, path)  # noqa: S310
+        urllib.request.urlretrieve(_ANALOGY_URL, path)
     return path
 
 
-def word_analogy(
-    W_in: npt.NDArray[np.float64],
-    vocab: Vocab,
-    questions_path: str = "questions-words.txt",
-) -> dict[str, tuple[int, int]]:
-    """Evaluate word analogies (a : b :: c : ?).
-
-    For each quadruple ``(a, b, c, d)``, finds the word closest to
-    ``b - a + c`` (excluding the query words) and checks if it equals *d*.
-
-    Returns a dict mapping category name to ``(correct, total)`` counts.
-    """
+def word_analogy(W_in, vocab, questions_path="questions-words.txt"):
+    """Evaluate word analogies (a : b :: c : ?). Returns {category: (correct, total)}."""
     questions_path = _download_analogies(questions_path)
 
     norms = np.linalg.norm(W_in, axis=1, keepdims=True)
@@ -89,6 +64,7 @@ def word_analogy(
     correct = 0
     total = 0
 
+    # TODO: vectorise this -- looping over 19k questions is slow
     with open(questions_path) as f:
         for line in f:
             line = line.strip()
@@ -132,8 +108,7 @@ def word_analogy(
     return results
 
 
-def print_analogy_results(results: dict[str, tuple[int, int]]) -> None:
-    """Print a formatted analogy accuracy report."""
+def print_analogy_results(results):
     overall_correct = 0
     overall_total = 0
 
@@ -161,20 +136,16 @@ _SIMLEX999_URL = (
 )
 
 
-def _download_file(url: str, path: str) -> str:
-    """Download a file if it doesn't exist locally."""
+def _download_file(url, path):
     if not os.path.exists(path):
         print(f"  Downloading {os.path.basename(path)} ...")
-        urllib.request.urlretrieve(url, path)  # noqa: S310
+        urllib.request.urlretrieve(url, path)
     return path
 
 
-def _spearman_correlation(
-    x: npt.NDArray[np.float64],
-    y: npt.NDArray[np.float64],
-) -> float:
-    """Spearman rank correlation between two 1-D arrays (pure NumPy)."""
-    def _rankdata(arr: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+def _spearman_correlation(x, y):
+    """Spearman rank correlation (no tie correction)."""
+    def _rankdata(arr):
         order = np.argsort(arr, kind="mergesort")
         ranks = np.empty_like(order, dtype=np.float64)
         ranks[order] = np.arange(1, len(arr) + 1, dtype=np.float64)
@@ -193,14 +164,8 @@ def _spearman_correlation(
     return float(np.corrcoef(_rankdata(x), _rankdata(y))[0, 1])
 
 
-def _load_similarity_dataset(
-    path: str,
-    word1_col: int,
-    word2_col: int,
-    score_col: int,
-) -> list[tuple[str, str, float]]:
-    """Parse a tab-separated word-similarity dataset (skip header, lowercase)."""
-    pairs: list[tuple[str, str, float]] = []
+def _load_similarity_dataset(path, word1_col, word2_col, score_col):
+    pairs = []
     with open(path) as f:
         next(f)
         for line in f:
@@ -215,21 +180,8 @@ def _load_similarity_dataset(
     return pairs
 
 
-def word_similarity(
-    W_in: npt.NDArray[np.float64],
-    vocab: Vocab,
-    dataset: str = "wordsim353",
-) -> dict[str, str | int | float]:
-    """Evaluate embeddings on a word similarity benchmark.
-
-    Args:
-        W_in: Center embedding matrix, shape ``(V, d)``.
-        vocab: Vocabulary instance.
-        dataset: One of ``"wordsim353"`` or ``"simlex999"``.
-
-    Returns:
-        Dict with ``dataset``, ``spearman``, ``covered``, ``total``, ``oov_pairs``.
-    """
+def word_similarity(W_in, vocab, dataset="wordsim353"):
+    """Evaluate on WordSim-353 or SimLex-999. Returns dict with spearman rho and coverage."""
     configs = {
         "wordsim353": (_WORDSIM353_URL, "wordsim353.tab", 0, 1, 2),
         "simlex999": (_SIMLEX999_URL, "SimLex-999.txt", 0, 1, 3),
@@ -245,25 +197,25 @@ def word_similarity(
     norms = np.linalg.norm(W_in, axis=1, keepdims=True)
     W_normed = W_in / np.maximum(norms, 1e-8)
 
-    human_scores: list[float] = []
-    model_scores: list[float] = []
+    gold: list[float] = []
+    pred: list[float] = []
 
     for w1, w2, score in pairs:
         idx1 = vocab.word_to_idx.get(w1)
         idx2 = vocab.word_to_idx.get(w2)
         if idx1 is None or idx2 is None:
             continue
-        human_scores.append(score)
-        model_scores.append(float(W_normed[idx1] @ W_normed[idx2]))
+        gold.append(score)
+        pred.append(float(W_normed[idx1] @ W_normed[idx2]))
 
-    covered = len(human_scores)
+    covered = len(gold)
     oov_pairs = total - covered
 
     if covered < 2:
         spearman = 0.0
     else:
         spearman = _spearman_correlation(
-            np.array(human_scores), np.array(model_scores)
+            np.array(gold), np.array(pred)
         )
 
     return {
@@ -275,8 +227,7 @@ def word_similarity(
     }
 
 
-def print_similarity_results(results: list[dict[str, str | int | float]]) -> None:
-    """Print a formatted word-similarity evaluation report."""
+def print_similarity_results(results):
     print(f"  {'Dataset':<15s}  {'Spearman':>8s}  {'Covered':>7s} / {'Total':>5s}  {'OOV':>5s}")
     print("  " + "-" * 48)
     for r in results:
@@ -286,8 +237,7 @@ def print_similarity_results(results: list[dict[str, str | int | float]]) -> Non
         )
 
 
-def _setup_plot_style() -> None:
-    """Apply a clean plot style for all figures."""
+def _setup_plot_style():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -305,13 +255,8 @@ def _setup_plot_style() -> None:
     })
 
 
-def plot_tsne(
-    W_in: npt.NDArray[np.float64],
-    vocab: Vocab,
-    top_n: int = 500,
-    path: str = "results/tsne.png",
-) -> None:
-    """t-SNE projection of frequent word embeddings, coloured by semantic category."""
+def plot_tsne(W_in, vocab, top_n=500, path="results/tsne.png"):
+    """t-SNE of top-N most frequent words."""
     try:
         from sklearn.manifold import TSNE  # type: ignore[import-untyped]
         import matplotlib.pyplot as plt
@@ -383,16 +328,9 @@ def plot_tsne(
     print(f"  Saved t-SNE plot to {path}")
 
 
-def plot_loss_curve(
-    losses: list[float],
-    path: str = "results/loss_curve.png",
-    log_interval: int = 1000,
-    lr_start: float = 0.025,
-    lr_end: float = 0.0001,
-    total_steps: int = 0,
-    epochs: int = 20,
-) -> None:
-    """Plot training loss with learning rate overlay and epoch markers."""
+def plot_loss_curve(losses, path="results/loss_curve.png", log_interval=1000,
+                    lr_start=0.025, lr_end=0.0001, total_steps=0, epochs=20):
+    """Plot training loss and LR schedule."""
     try:
         import matplotlib.pyplot as plt
     except ImportError:
@@ -444,11 +382,8 @@ _SEMANTIC_CATEGORIES = {
 }
 
 
-def plot_analogy_categories(
-    results: dict[str, tuple[int, int]],
-    path: str = "results/analogy_categories.png",
-) -> None:
-    """Horizontal bar chart of per-category analogy accuracy."""
+def plot_analogy_categories(results, path="results/analogy_categories.png"):
+    """Bar chart of per-category analogy accuracy."""
     try:
         import matplotlib.pyplot as plt
     except ImportError:
@@ -514,12 +449,8 @@ def plot_analogy_categories(
     print(f"  Saved analogy bar chart to {path}")
 
 
-def plot_similarity_heatmap(
-    W_in: npt.NDArray[np.float64],
-    vocab: Vocab,
-    path: str = "results/similarity_heatmap.png",
-) -> None:
-    """Heatmap of pairwise cosine similarities across semantic groups."""
+def plot_similarity_heatmap(W_in, vocab, path="results/similarity_heatmap.png"):
+    """Heatmap of pairwise cosine similarities."""
     try:
         import matplotlib.pyplot as plt
     except ImportError:
@@ -586,12 +517,8 @@ def plot_similarity_heatmap(
     print(f"  Saved similarity heatmap to {path}")
 
 
-def plot_analogy_vectors(
-    W_in: npt.NDArray[np.float64],
-    vocab: Vocab,
-    path: str = "results/analogy_vectors.png",
-) -> None:
-    """PCA projection of analogy pairs showing parallel vector structure."""
+def plot_analogy_vectors(W_in, vocab, path="results/analogy_vectors.png"):
+    """PCA projection showing analogy parallelogram structure."""
     try:
         from sklearn.decomposition import PCA  # type: ignore[import-untyped]
         import matplotlib.pyplot as plt

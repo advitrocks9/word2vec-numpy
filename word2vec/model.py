@@ -1,4 +1,4 @@
-"""SGNS model: forward, backward, SGD update, gradient checking, persistence."""
+"""SGNS model with Numba-accelerated SGD"""
 
 from typing import Any
 
@@ -8,21 +8,8 @@ import numpy.typing as npt
 
 
 @numba.njit(fastmath=True)
-def _scatter_update(
-    W_in: npt.NDArray[np.float64],
-    W_out: npt.NDArray[np.float64],
-    center_idx: npt.NDArray[np.int32],
-    ctx_neg_idx: npt.NDArray[np.int32],
-    grad_v_in: npt.NDArray[np.float64],
-    grad_v_out: npt.NDArray[np.float64],
-    effective_lr: float,
-) -> None:
-    """JIT-compiled scatter subtract for W_in and W_out.
-
-    Replaces np.add.at — iterates over batch and embedding dims directly,
-    which lets LLVM fuse the multiply-subtract and avoid the Python dispatch
-    overhead that np.add.at incurs per call.
-    """
+def _scatter_update(W_in, W_out, center_idx, ctx_neg_idx, grad_v_in, grad_v_out, effective_lr):
+    """Accumulate gradient updates for W_in and W_out (handles duplicate indices)."""
     B = center_idx.shape[0]
     nk = ctx_neg_idx.shape[1]
     d = W_in.shape[1]
@@ -38,11 +25,7 @@ def _scatter_update(
 
 
 class SGNSModel:
-    """Skip-Gram with Negative Sampling, pure NumPy.
-
-    W_in (V, d): center embeddings — the output after training.
-    W_out (V, d): context embeddings — auxiliary, discarded post-training.
-    """
+    """Skip-Gram with Negative Sampling."""
 
     def __init__(self, vocab_size: int, embed_dim: int = 100, n_negatives: int = 5,
                  batch_size: int = 4096) -> None:
@@ -73,7 +56,7 @@ class SGNSModel:
         ctx_neg_idx: npt.NDArray[np.int32],
         labels: npt.NDArray[np.float64],
     ) -> tuple[npt.NDArray[np.float64], float]:
-        """SGNS forward pass; returns (scores, bce_loss)."""
+        """Forward pass, returns (scores, mean BCE loss)."""
         v_in = self.W_in[center_idx]      # (B, d)
         v_out = self.W_out[ctx_neg_idx]   # (B, 1+K, d)
 
@@ -100,7 +83,7 @@ class SGNSModel:
         return scores, loss
 
     def backward(self) -> None:
-        """Backprop through the cached forward pass."""
+        """Compute gradients from cached forward pass."""
         v_in = self._cache["v_in"]
         v_out = self._cache["v_out"]
         scores = self._cache["scores"]
@@ -118,11 +101,7 @@ class SGNSModel:
         self._grad_v_in = np.einsum("bk,bkd->bd", grad_scores, v_out)
 
     def update(self, lr: float) -> None:
-        """Apply SGD; delegates scatter-add to the Numba JIT kernel.
-
-        Direct fancy-indexed assignment silently overwrites duplicate indices,
-        so the JIT loop manually accumulates each occurrence instead.
-        """
+        """SGD step via Numba scatter kernel (np.add.at is too slow)."""
         center_idx = self._cache["center_idx"]
         ctx_neg_idx = self._cache["ctx_neg_idx"]
 
@@ -136,18 +115,8 @@ class SGNSModel:
             effective_lr,
         )
 
-    def _check_grad_block(
-        self,
-        W: npt.NDArray[np.float64],
-        grad_W: npt.NDArray[np.float64],
-        unique_indices: list[int],
-        center_idx: npt.NDArray[np.int32],
-        ctx_neg_idx: npt.NDArray[np.int32],
-        labels: npt.NDArray[np.float64],
-        epsilon: float,
-        n_checks: int,
-    ) -> float:
-        """Finite-difference check on a subset of indices in W; returns max relative error."""
+    def _check_grad_block(self, W, grad_W, unique_indices, center_idx, ctx_neg_idx,
+                          labels, epsilon, n_checks):
         max_rel_err = 0.0
         d = self.embed_dim
         for idx in unique_indices[:3]:
@@ -177,7 +146,8 @@ class SGNSModel:
         labels: npt.NDArray[np.float64],
         epsilon: float = 1e-5,
     ) -> float:
-        """Finite-difference gradient check; returns max relative error."""
+        """Finite-difference gradient check. Returns max relative error."""
+        # TODO: this is slow for large batches, only use small B for checking
         self.forward(center_idx, ctx_neg_idx, labels)
         self.backward()
 
@@ -209,7 +179,6 @@ class SGNSModel:
         return max(err_in, err_out)
 
     def save(self, path: str) -> None:
-        """Save weights and all hyperparameters to a .npz file."""
         arrays: dict[str, npt.NDArray[np.float64]] = {
             "W_in": self.W_in,
             "W_out": self.W_out,
@@ -224,7 +193,6 @@ class SGNSModel:
 
     @classmethod
     def load(cls, path: str) -> "SGNSModel":
-        """Load weights and all hyperparameters from a .npz file."""
         data = np.load(path)
         model = cls(
             int(data["vocab_size"]),

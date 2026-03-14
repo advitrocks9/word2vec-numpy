@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""CLI entry point: download text8, run gradient check, train SGNS, evaluate."""
+"""Train word2vec SGNS on text8."""
 
 import os
 import time
@@ -40,14 +39,13 @@ MIN_DELTA    = 0.0005
 
 
 def download_text8(path: str = "text8") -> str:
-    """Download and extract the text8 corpus if not already present."""
     if os.path.exists(path):
         return path
 
     url = "http://mattmahoney.net/dc/text8.zip"
     zip_path = path + ".zip"
     print(f"Downloading {url} ...")
-    urllib.request.urlretrieve(url, zip_path)  # noqa: S310
+    urllib.request.urlretrieve(url, zip_path)
 
     print("Extracting ...")
     with zipfile.ZipFile(zip_path, "r") as z:
@@ -57,7 +55,6 @@ def download_text8(path: str = "text8") -> str:
 
 
 def _find_latest_checkpoint() -> int:
-    """Scan results/ for model_epoch{N}.npz and return the highest N, or 0."""
     if not os.path.isdir("results"):
         return 0
     latest = 0
@@ -71,8 +68,7 @@ def _find_latest_checkpoint() -> int:
     return latest
 
 
-def main() -> None:
-    """Run the full training and evaluation pipeline."""
+def main():
     np.random.seed(SEED)
     os.makedirs("results", exist_ok=True)
 

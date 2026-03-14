@@ -1,6 +1,4 @@
-"""Vectorized data pipeline: subsampling, dynamic windowing, batch generation."""
-
-from collections.abc import Iterator
+"""Data pipeline: subsampling, windowing, batching"""
 
 import numpy as np
 import numpy.typing as npt
@@ -9,7 +7,6 @@ from word2vec.vocab import Vocab
 
 
 class DataLoader:
-    """Produces training batches of (center, context+negatives, labels)."""
 
     def __init__(
         self,
@@ -18,7 +15,7 @@ class DataLoader:
         window: int = 5,
         batch_size: int = 512,
         n_negatives: int = 5,
-        subsample_t: float = 1e-5,
+        subsample_t: float = 1e-4,
     ) -> None:
         self.vocab = vocab
         self.corpus = corpus.copy()
@@ -29,8 +26,8 @@ class DataLoader:
 
         self._subsample()
 
-    def _subsample(self) -> None:
-        """Mikolov subsampling: drop frequent words with probability 1 - sqrt(t/f)."""
+    def _subsample(self):
+        """Drop frequent words using Mikolov's subsampling formula."""
         total = float(self.vocab.counts.sum())
         freqs = self.vocab.counts.astype(np.float64) / total
 
@@ -40,8 +37,7 @@ class DataLoader:
         mask = np.random.rand(len(self.corpus)) < p_keep[self.corpus]
         self.corpus = self.corpus[mask]
 
-    def __iter__(self) -> Iterator[tuple[npt.NDArray[np.int32], npt.NDArray[np.int32], npt.NDArray[np.float64]]]:
-        """Yield (centers, ctx_and_negs, labels) batches."""
+    def __iter__(self):
         corpus = self.corpus
         corpus_len = len(corpus)
         window = self.window
@@ -73,6 +69,7 @@ class DataLoader:
             pair_centers.append(corpus[expanded_pos])
             pair_contexts.append(corpus[context_pos])
 
+        # TODO: could yield chunks lazily instead of concatenating everything
         all_centers = np.concatenate(pair_centers)
         all_contexts = np.concatenate(pair_contexts)
 
@@ -87,6 +84,8 @@ class DataLoader:
             centers = all_centers[s:e]
             contexts = all_contexts[s:e]
 
+            # not filtering out cases where a negative sample == the positive context word
+            # collision probability is ~K/V per pair which is negligible for V=71k
             neg_indices = np.random.randint(0, len(self.vocab.neg_table), size=(B, K))
             negatives = self.vocab.neg_table[neg_indices]
 
@@ -99,7 +98,6 @@ class DataLoader:
 
             yield centers, ctx_and_negs, labels
 
-    def __len__(self) -> int:
-        """Approximate number of batches per epoch."""
+    def __len__(self):
         n_valid = max(0, len(self.corpus) - 2 * self.window)
         return max(1, (n_valid * (self.window + 1)) // self.batch_size)
